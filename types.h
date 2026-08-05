@@ -8,8 +8,8 @@ namespace hy3 {
 
 // Identidad del motor
 constexpr const char* ENGINE_NAME = "Hy3";
-constexpr const char* ENGINE_VERSION = "1.5";
-constexpr const char* ENGINE_ID = "Hy3 1.5";
+constexpr const char* ENGINE_VERSION = "1.6";
+constexpr const char* ENGINE_ID = "Hy3 1.6";
 
 // Casillas 0..63 (a1=0, b1=1, ..., h8=63)
 using Square = int;
@@ -23,7 +23,9 @@ enum PieceType : int {
 };
 
 // Codificación de pieza: color*8 + tipo  (0..11)
-inline Piece make_piece(Color c, PieceType t) { return c * 8 + t; }
+constexpr Piece make_piece(Color c, PieceType t) { return c * 8 + t; }
+// Casilla vacía = (cualquier color, NONE). Constante con nombre para claridad.
+constexpr Piece EMPTY = make_piece(WHITE, NONE);
 inline Color piece_color(Piece p) { return Color(p >> 3); }
 inline PieceType piece_type(Piece p) { return PieceType(p & 7); }
 

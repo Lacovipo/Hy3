@@ -65,10 +65,25 @@ struct Board {
     // balance (en centipeones) de jugar el intercambio completo.
     // gain = (valor de lo que capturamos) - (lo que perderíamos en la réplica).
     int see(Square to, Color us) const;
+
+    // SEE de una JUGADA concreta: a diferencia de see(to, us), que siempre
+    // asume que captura el atacante más barato, see_move() arranca el
+    // intercambio con la pieza que realmente se mueve. Así Dxd5 y exd5 dejan
+    // de recibir la misma puntuación. Maneja además capturas al paso y
+    // promociones.
+    int see_move(Move m) const;
+
+    // ¿La posición es válida para buscar? (exactamente un rey por bando)
+    bool is_valid() const { return king_sq[WHITE] != NO_SQ && king_sq[BLACK] != NO_SQ; }
 };
 
 // (Depuración) contadores de make/unmake
 void debug_counts(long& mk, long& um);
+
+// Componentes Zobrist expuestos para la actualización incremental del
+// null-move en la búsqueda (evita recalcular la clave entera).
+uint64_t zobrist_side();
+uint64_t zobrist_ep(Square s);
 
 // Utilidades de coordenadas
 inline int sq_file(Square s) { return s & 7; }

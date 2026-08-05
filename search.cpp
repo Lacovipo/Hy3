@@ -1,4 +1,5 @@
 // search.cpp - Implementación de la búsqueda
+#include <cmath>
 #include "search.h"
 #include <iostream>
 #include <chrono>
@@ -11,15 +12,42 @@ namespace hy3 {
 bool insufficient_material(const Board& b) {
     int n[2][6] = {0};
     int total = 0;
+    int bishop_sq_color[2] = { -1, -1 };
+    bool two_bishop_colors[2] = { false, false };
     for (int sq = 0; sq < 64; sq++) {
         Piece p = b.squares[sq];
         if (piece_type(p) == NONE) continue;
-        n[piece_color(p)][piece_type(p)]++;
+        int c = piece_color(p), t = piece_type(p);
+        n[c][t]++;
+        if (t == BISHOP) {
+            int col = (sq_file(sq) + sq_rank(sq)) & 1;
+            if (bishop_sq_color[c] < 0) bishop_sq_color[c] = col;
+            else if (bishop_sq_color[c] != col) two_bishop_colors[c] = true;
+        }
         total++;
     }
-    if (total <= 2) return true;                 // K vs K
-    if (total == 3) {                            // K + (N o B) vs K
-        if (n[0][KNIGHT] + n[0][BISHOP] + n[1][KNIGHT] + n[1][BISHOP] == 1)
+    // Con cualquier peón, torre o dama sobre el tablero hay material suficiente.
+    if (n[0][PAWN] || n[1][PAWN] || n[0][ROOK] || n[1][ROOK] || n[0][QUEEN] || n[1][QUEEN])
+        return false;
+
+    if (total <= 2) return true;                       // K vs K
+    if (total == 3)                                    // K+N vs K, K+B vs K
+        return (n[0][KNIGHT] + n[0][BISHOP] + n[1][KNIGHT] + n[1][BISHOP] == 1);
+    if (total == 4) {
+        // K+B vs K+B con ambos alfiles en casillas del mismo color: tablas.
+        if (n[0][BISHOP] == 1 && n[1][BISHOP] == 1 &&
+            n[0][KNIGHT] == 0 && n[1][KNIGHT] == 0 &&
+            bishop_sq_color[0] == bishop_sq_color[1]) return true;
+        // K+N+N vs K: no se puede forzar mate.
+        if ((n[0][KNIGHT] == 2 && n[0][BISHOP] == 0 && n[1][KNIGHT] + n[1][BISHOP] == 0) ||
+            (n[1][KNIGHT] == 2 && n[1][BISHOP] == 0 && n[0][KNIGHT] + n[0][BISHOP] == 0))
+            return true;
+    }
+    // Varios alfiles del mismo bando, todos en el mismo color de casilla, vs rey solo.
+    for (int c = 0; c < 2; c++) {
+        int other = c ^ 1;
+        if (n[other][KNIGHT] + n[other][BISHOP] == 0 &&
+            n[c][KNIGHT] == 0 && n[c][BISHOP] >= 1 && !two_bishop_colors[c])
             return true;
     }
     return false;
@@ -36,25 +64,28 @@ struct TTEntry {
     int16_t  score = 0;
     uint32_t move  = 0;
     uint8_t  flag  = 0;    // 0 exact, 1 lower, 2 upper
+    uint8_t  age   = 0;    // generación de búsqueda (envejecimiento)
 };
 struct TTBucket { TTEntry e[2]; };
 
 static std::vector<TTBucket> tt;
-static size_t TT_MASK = 0;
+static size_t TT_BUCKETS = 0;
 static int    g_tt_mb = 64;      // tamaño por defecto (MB)
+static uint8_t g_tt_age = 0;     // generación actual
 
 static void tt_alloc(int mb) {
     if (mb < 1) mb = 1;
     if (mb > 4096) mb = 4096;
     g_tt_mb = mb;
-    // nº de buckets = potencia de 2 que quepa en 'mb' megabytes.
+    // v1.5 redondeaba a la potencia de 2 inferior y desperdiciaba hasta el 25 %
+    // de la memoria pedida. v1.6 usa TODOS los buckets que caben y mapea el
+    // hash con una multiplicación de 128 bits (evita el módulo caro).
     size_t bytes = (size_t)mb * 1024 * 1024;
     size_t nbuckets = bytes / sizeof(TTBucket);
-    size_t pow2 = 1;
-    while (pow2 * 2 <= nbuckets) pow2 *= 2;
-    if (pow2 < 1024) pow2 = 1024;
-    tt.assign(pow2, TTBucket{});
-    TT_MASK = pow2 - 1;
+    if (nbuckets < 1024) nbuckets = 1024;
+    tt.assign(nbuckets, TTBucket{});
+    TT_BUCKETS = nbuckets;
+    g_tt_age = 0;
 }
 
 static void tt_init() {
@@ -64,11 +95,19 @@ static void tt_init() {
 
 void tt_resize(int mb) { tt_alloc(mb); }
 
-static inline size_t tt_idx(uint64_t h) { return (size_t)h & TT_MASK; }
+// Mapea la clave al rango [0, TT_BUCKETS) sin módulo: toma los 64 bits altos
+// del producto de 128 bits h * TT_BUCKETS.
+static inline size_t tt_idx(uint64_t h) {
+    return (size_t)(((unsigned __int128)h * (unsigned __int128)TT_BUCKETS) >> 64);
+}
+
+// Avanza la generación de la TT (una por jugada real, no por iteración).
+void tt_new_search() { g_tt_age++; }
 
 void tt_clear() {
     if (tt.empty()) return;
     std::fill(tt.begin(), tt.end(), TTBucket{});
+    g_tt_age = 0;
 }
 
 // Sonda: devuelve puntero a la entrada que coincide con 'h', o nullptr.
@@ -82,23 +121,52 @@ static inline TTEntry* tt_probe(uint64_t h) {
 // Almacena una entrada aplicando la política de 2 cubos.
 static inline void tt_store(uint64_t h, int depth, int score, uint32_t move, uint8_t flag) {
     TTBucket& b = tt[tt_idx(h)];
-    // Cubo 0: depth-preferred. Reemplaza si es la misma posición o si la nueva
-    // búsqueda es al menos igual de profunda que la almacenada.
-    if (b.e[0].key == h || depth >= b.e[0].depth) {
-        // Conserva la jugada previa si la nueva no trae una (p. ej. cota de NMP).
-        if (move == 0 && b.e[0].key == h) move = b.e[0].move;
+    // Misma posición ya presente: actualizar in situ, pero sin degradar una
+    // entrada más profunda de la generación actual (v1.5 se pisaba a sí misma
+    // con búsquedas menos profundas).
+    for (int i = 0; i < 2; i++) {
+        if (b.e[i].key == h) {
+            if (depth >= b.e[i].depth || b.e[i].age != g_tt_age || flag == 0) {
+                if (move == 0) move = b.e[i].move;   // conserva la jugada previa
+                b.e[i].depth = (int16_t)depth; b.e[i].score = (int16_t)score;
+                b.e[i].move = move; b.e[i].flag = flag; b.e[i].age = g_tt_age;
+            }
+            return;
+        }
+    }
+    // Cubo 0: depth-preferred, con envejecimiento (una entrada de una jugada
+    // anterior se considera reemplazable aunque sea más profunda).
+    bool stale0 = (b.e[0].age != g_tt_age);
+    if (b.e[0].key == 0 || stale0 || depth >= b.e[0].depth) {
+        // La entrada desalojada baja al cubo 1 en vez de perderse.
+        if (b.e[0].key != 0) b.e[1] = b.e[0];
         b.e[0].key = h; b.e[0].depth = (int16_t)depth;
-        b.e[0].score = (int16_t)score; b.e[0].move = move; b.e[0].flag = flag;
+        b.e[0].score = (int16_t)score; b.e[0].move = move;
+        b.e[0].flag = flag; b.e[0].age = g_tt_age;
     } else {
         // Cubo 1: always-replace.
         b.e[1].key = h; b.e[1].depth = (int16_t)depth;
-        b.e[1].score = (int16_t)score; b.e[1].move = move; b.e[1].flag = flag;
+        b.e[1].score = (int16_t)score; b.e[1].move = move;
+        b.e[1].flag = flag; b.e[1].age = g_tt_age;
     }
 }
 
 // Historial de claves Zobrist de la partida real (para triple repetición).
 static std::vector<uint64_t> g_game_hist;
 void set_game_history(const std::vector<uint64_t>& keys) { g_game_hist = keys; }
+
+// Nº de veces que 'h' aparece en el historial real de la partida, limitando la
+// búsqueda a las últimas 'halfmove' posiciones (más allá hubo un movimiento
+// irreversible y no puede haber repetición).
+static inline int game_hist_count(uint64_t h, int halfmove) {
+    int n = 0;
+    int lim = (int)g_game_hist.size();
+    int start = lim - halfmove - 1;
+    if (start < 0) start = 0;
+    for (int i = lim - 1; i >= start; i--)
+        if (g_game_hist[i] == h) n++;
+    return n;
+}
 
 // Normalización de puntuaciones de mate al guardar/leer de la TT.
 // En el árbol las puntuaciones de mate son relativas a la raíz (MATE - ply).
@@ -120,16 +188,21 @@ struct Context {
     uint64_t nodes = 0;
     int64_t start_ms = 0;
     int64_t time_ms = 0;
+    int64_t max_time_ms = 0;    // techo duro (nunca sobrepasarlo)
     bool stop = false;
     std::vector<uint64_t> rep;                   // hashes en el camino actual
     Move killers[128][2];
     // History heuristic: historial[color][from][to] (piezas no-captura)
     int history[2][64][64];
-    Move parent_move = 0;   // jugada que condujo a este nodo (para anti-repetir)
+    // Countermove: la refutación que funcionó frente a la jugada anterior.
+    Move countermove[2][64][64];
+    // Jugada que condujo a cada ply (para countermove y anti-ping-pong).
+    Move move_at_ply[128];
     bool has_time_limit = true;
     // Tabla triangular de la Variante Principal (PV)
     Move pv_table[128][128];
     int pv_len[128];
+    int root_halfmove = 0;      // reloj de 50 en la raíz (para acotar el historial)
 };
 
 static int64_t now_ms() {
@@ -138,45 +211,89 @@ static int64_t now_ms() {
 }
 
 static std::atomic<bool> g_stop_flag{false};
+static std::atomic<bool> g_pondering{false};
+static std::atomic<int64_t> g_ponder_start{0};
+
+void set_pondering(bool on) {
+    g_pondering.store(on, std::memory_order_relaxed);
+    if (on) g_ponder_start.store(now_ms(), std::memory_order_relaxed);
+}
+
+// El GUI confirmó la jugada ponderada: dejamos de ignorar el reloj.
+void ponder_hit() { g_pondering.store(false, std::memory_order_relaxed); }
+
+// ---- Traza del árbol de búsqueda (depuración) ----
+static bool g_tree_debug = false;
+static int  g_tree_max_depth = 3;
+void set_tree_debug(bool on, int max_depth_print) {
+    g_tree_debug = on;
+    g_tree_max_depth = max_depth_print;
+}
 
 static bool time_up(Context& ctx) {
     if (ctx.stop) return true;
     if (g_stop_flag.load(std::memory_order_relaxed)) { ctx.stop = true; return true; }
+    // En ponder el reloj propio no corre: seguimos pensando hasta stop/ponderhit.
+    if (g_pondering.load(std::memory_order_relaxed)) return false;
     if (!ctx.has_time_limit) return false;
     if (now_ms() - ctx.start_ms >= ctx.time_ms) { ctx.stop = true; return true; }
     return false;
 }
 
 // ---------------- Ordenación de movimientos ----------------
+// Escala v1.6 (bandas separadas y sin solapamientos):
+//   TT                       2.000.000
+//   promoción a dama         1.900.000
+//   captura con SEE >= 0     1.500.000 + MVV-LVA
+//   killer 1 / killer 2      1.400.000 / 1.390.000
+//   countermove              1.380.000
+//   quiets (history)             0 .. 1.000.000
+//   captura con SEE < 0        -100.000 + MVV-LVA
 static int move_order_score(const Board& b, Move m, Move tt_move, const Context& ctx, int ply) {
-    if (tt_move != 0 && m == tt_move) return 100000000;
+    if (tt_move != 0 && m == tt_move) return 2000000;
     int flag = move_flag(m);
+    int promo = move_promo(m);
+
     if (flag == FLAG_CAPTURE || flag == FLAG_EP) {
         Square to = move_to(m);
         Piece victim = b.squares[to];
-        int vv = (piece_type(victim) == NONE) ? 100 : PIECE_VALUE[piece_type(victim)];
+        // En una captura al paso la víctima no está en 'to' sino al lado.
+        int vv = (flag == FLAG_EP) ? PIECE_VALUE[PAWN]
+               : (piece_type(victim) == NONE ? 0 : PIECE_VALUE[piece_type(victim)]);
         int av = PIECE_VALUE[piece_type(b.squares[move_from(m)])];
-        // MVV-LVA: prioriza capturar piezas caras con piezas baratas.
-        // Bonifica además las capturas que sobreviven al intercambio (SEE >= 0).
-        int see_score = b.see(to, b.side);
-        int base = 1000000 + vv * 16 - av;
-        if (see_score >= 0) base += 500000;   // captura "ganadora" o neutral
-        return base;
+        int mvvlva = vv * 16 - av / 10;
+        // SEE de la JUGADA concreta (v1.5 usaba see(casilla) y daba la misma
+        // puntuación a Dxd5 que a exd5).
+        int see_score = b.see_move(m);
+        if (see_score >= 0) return 1500000 + mvvlva;
+        return -100000 + mvvlva;              // captura perdedora: al final
     }
-    int promo = move_promo(m);
-    // promo (1=N,2=B,3=R,4=Q) coincide con PieceType, indexar sin desplazar.
-    if (promo != 0) return 900000 + PIECE_VALUE[promo] * 16;
+    // Promoción sin captura: la dama es la única realmente prioritaria.
+    if (promo != 0) {
+        if (promo == QUEEN) return 1900000;
+        return 1350000 + PIECE_VALUE[promo];
+    }
     // killers
     if (ply < 128) {
-        if (ctx.killers[ply][0] == m) return 800000;
-        if (ctx.killers[ply][1] == m) return 700000;
+        if (ctx.killers[ply][0] == m) return 1400000;
+        if (ctx.killers[ply][1] == m) return 1390000;
+    }
+    // Countermove: refutación que ya funcionó contra la jugada anterior.
+    if (ply > 0 && ply < 128) {
+        Move prev = ctx.move_at_ply[ply - 1];
+        if (prev != 0 && ctx.countermove[b.side][move_from(prev)][move_to(prev)] == m)
+            return 1380000;
     }
     // history heuristic (movimientos no-captura)
     Square f = move_from(m), t = move_to(m);
     int score = (f >= 0 && f < 64 && t >= 0 && t < 64) ? ctx.history[b.side][f][t] : 0;
+    if (score > 1000000) score = 1000000;
     // Anti-repetir: penaliza deshacer la jugada que nos trajo aquí (ping-pong).
-    if (ctx.parent_move != 0) {
-        Square pf = move_from(ctx.parent_move), pt = move_to(ctx.parent_move);
+    // v1.6 usa la jugada del ply anterior REAL, no una variable global que se
+    // arrastraba entre subárboles hermanos.
+    if (ply > 0 && ply < 128 && ctx.move_at_ply[ply - 1] != 0) {
+        Move prev = ctx.move_at_ply[ply - 1];
+        Square pf = move_from(prev), pt = move_to(prev);
         if (f == pt && t == pf) score -= 50000;
     }
     return score;
@@ -204,6 +321,28 @@ static void order_moves(const Board& b, MoveList& moves, Move tt_move, const Con
 static const int INF = MATE + 1000;
 static const int MAX_PLY = 128;
 
+// Notación UCI de una jugada (para la traza del árbol). Duplicado local para
+// no crear una dependencia de search.cpp sobre uci.cpp.
+static std::string dbg_move_str(Move m) {
+    if (m == 0) return "0000";
+    std::string s = square_to_string(move_from(m)) + square_to_string(move_to(m));
+    int pr = move_promo(m);
+    if (pr) { const char* c = " nbrq"; s += c[pr]; }
+    return s;
+}
+
+// Tabla de reducciones LMR precalculada: LMR_TABLE[depth][move_index].
+// Fórmula estándar: 0.75 + ln(d) * ln(m) / 2.25
+static int LMR_TABLE[64][64];
+static bool g_lmr_init = false;
+static void init_lmr_table() {
+    if (g_lmr_init) return;
+    for (int d = 1; d < 64; d++)
+        for (int m = 1; m < 64; m++)
+            LMR_TABLE[d][m] = (int)(0.75 + std::log((double)d) * std::log((double)m) / 2.25);
+    g_lmr_init = true;
+}
+
 // ---------------- Quiescence ----------------
 static Score quiescence(Board& b, Score alpha, Score beta, int ply, Context& ctx) {
     if (time_up(ctx)) return 0;
@@ -228,6 +367,7 @@ static Score quiescence(Board& b, Score alpha, Score beta, int ply, Context& ctx
         for (int i = 0; i < moves.count; i++) {
             Move m = moves[i];
             Undo u; b.make_move(m, u);
+            ctx.move_at_ply[ply] = m;
             Score sc = -quiescence(b, -beta, -alpha, ply + 1, ctx);
             b.unmake_move(m, u);
             if (ctx.stop) { ctx.rep.pop_back(); return alpha; }
@@ -239,31 +379,65 @@ static Score quiescence(Board& b, Score alpha, Score beta, int ply, Context& ctx
         return best;
     }
 
+    // ---- Sonda de la TT en quiescence ----
+    // Las entradas de QS se guardan con depth 0; solo se usan para cortar,
+    // nunca para sustituir una entrada de búsqueda normal más profunda.
+    Move ttm = 0;
+    TTEntry* tte = tt_probe(h);
+    if (tte) {
+        ttm = (Move)tte->move;
+        int sc = score_from_tt(tte->score, ply);
+        if (tte->flag == 0) return sc;
+        if (tte->flag == 1 && sc >= beta) return sc;
+        if (tte->flag == 2 && sc <= alpha) return sc;
+    }
+
     Score stand = evaluate(b);
-    if (stand >= beta) return beta;
+    if (stand >= beta) return stand;
     if (stand > alpha) alpha = stand;
 
-    MoveList moves; b.legal_moves(moves);
-    // Solo capturas y promociones en quiescence
-    MoveList qm;
-    for (int i = 0; i < moves.count; i++) {
-        Move m = moves[i];
-        if (move_flag(m) == FLAG_CAPTURE || move_flag(m) == FLAG_EP || move_promo(m) != 0)
-            qm.push_back(m);
-    }
-    order_moves(b, qm, 0, ctx, ply);
+    // v1.6: generador dedicado de capturas/promociones. v1.5 generaba todas las
+    // legales (~85 % descartadas) y además, si no había NINGUNA legal, no lo
+    // detectaba aquí: el ahogado se puntuaba con la evaluación material.
+    MoveList qm; generate_captures(b, qm);
+    order_moves(b, qm, ttm, ctx, ply);
+
+    Score alpha_orig = alpha;
+    Score best = stand;
+    Move best_move = 0;
     ctx.rep.push_back(h);
     for (int i = 0; i < qm.count; i++) {
         Move m = qm[i];
+        if (!b.is_legal(m)) continue;              // el generador es pseudolegal
+
+        // ---- Poda SEE: descarta capturas claramente perdedoras ----
+        if (move_promo(m) == 0 && b.see_move(m) < 0) continue;
+
+        // ---- Delta pruning: ni capturando la pieza se alcanza alpha ----
+        {
+            int victim = (move_flag(m) == FLAG_EP)
+                       ? PIECE_VALUE[PAWN]
+                       : (piece_type(b.squares[move_to(m)]) == NONE
+                          ? 0 : PIECE_VALUE[piece_type(b.squares[move_to(m)])]);
+            int promo_gain = move_promo(m) ? PIECE_VALUE[move_promo(m)] - PIECE_VALUE[PAWN] : 0;
+            if (stand + victim + promo_gain + 200 < alpha) continue;
+        }
+
         Undo u; b.make_move(m, u);
+        ctx.move_at_ply[ply] = m;
         Score sc = -quiescence(b, -beta, -alpha, ply + 1, ctx);
         b.unmake_move(m, u);
         if (ctx.stop) { ctx.rep.pop_back(); return alpha; }
-        if (sc >= beta) { ctx.rep.pop_back(); return beta; }
+        if (sc > best) { best = sc; best_move = m; }
         if (sc > alpha) alpha = sc;
+        if (alpha >= beta) break;
     }
     ctx.rep.pop_back();
-    return alpha;
+    if (!ctx.stop) {
+        uint8_t flag = (best >= beta) ? 1 : (best > alpha_orig ? 0 : 2);
+        tt_store(h, 0, score_to_tt(best, ply), best_move, flag);
+    }
+    return best;
 }
 
 // ---------------- Negamax con PVS ----------------
@@ -278,13 +452,19 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
     uint64_t h = b.zkey;
     // Repetición dentro del árbol de búsqueda -> tablas.
     for (uint64_t prev : ctx.rep) if (prev == h) return 0;
-    // Repetición contra el historial real de la partida (una coincidencia en la
-    // línea actual + una en la partida ya basta para forzar el reclamo de tablas
-    // y evitar cegueras ante repeticiones previas al inicio de la búsqueda).
-    if (ply > 0) {
-        for (uint64_t prev : g_game_hist) if (prev == h) return 0;
+    // Repetición contra el historial REAL de la partida. v1.5 devolvía tablas
+    // con UNA sola aparición previa, lo que hacía al motor rehuir posiciones
+    // ganadoras ya visitadas una vez. v1.6 exige dos apariciones históricas
+    // (que con la posición actual completan la triple repetición); el recorrido
+    // se acota además por el reloj de 50 jugadas.
+    if (ply > 0 && !g_game_hist.empty()) {
+        if (game_hist_count(h, b.halfmove) >= 2) return 0;
     }
-    if (b.halfmove >= 100) return 0;                        // regla de 50
+    // Regla de 50 jugadas. Ojo: si el bando en turno está en jaque y no tiene
+    // salidas, es MATE y el mate prevalece sobre las tablas (v1.5 devolvía 0).
+    if (b.halfmove >= 100) {
+        if (!b.in_check() || b.legal_move_count() > 0) return 0;
+    }
     if (insufficient_material(b)) return 0;
 
     bool in_check = b.in_check();
@@ -315,7 +495,13 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
     if (!is_pv && !in_check && depth <= 3 &&
         beta > -MATE + 1000 && beta < MATE - 1000) {
         int margin = 120 * depth;
-        if (static_eval - margin >= beta) return static_eval - margin;
+        // Guarda anti-ahogado: si el bando en turno no tiene jugadas legales,
+        // la posición es tablas por ahogado (0), no la evaluación material.
+        // v1.5 podaba estas posiciones devolviendo una ventaja inexistente.
+        if (static_eval - margin >= beta) {
+            if (b.legal_move_count() > 0) return static_eval - margin;
+            return 0;
+        }
     }
 
     MoveList moves; b.legal_moves(moves);
@@ -333,7 +519,11 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
     // Null-Move Pruning: si no estamos en jaque (ni el rival), no es final de
     // juego (pocas piezas) y tenemos margen de ventana, probamos un "null move".
     // Si el rival no puede refutar con profundidad reducida, podamos la rama.
-    if (!in_check && !b.in_check(Color(b.side ^ 1)) && depth >= 3) {
+    // v1.6: se elimina la comprobación de "rival en jaque" (imposible en una
+    // posición legal con el turno correcto: sería un rey capturable) y se
+    // añade la condición de que la evaluación estática supere beta.
+    if (!is_pv && !in_check && depth >= 3 && static_eval >= beta &&
+        beta > -MATE + 1000 && beta < MATE - 1000) {
         int nonPawn = 0;
         for (int sq = 0; sq < 64; sq++) {
             Piece p = b.squares[sq];
@@ -343,14 +533,20 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
             nonPawn++;
         }
         if (nonPawn >= 2) {
-            int R = 2 + (depth / 4);
+            // Reducción adaptativa: más profunda cuanto mayor sea el margen.
+            int R = 3 + depth / 6 + std::min((static_eval - beta) / 200, 3);
+            if (R > depth - 1) R = depth - 1;
             // Reducimos la ventana (null-window) alrededor de beta.
             ctx.rep.push_back(h);
             Square saved_ep = b.ep_square;
             uint64_t saved_key = b.zkey;
+            // Actualización INCREMENTAL de la clave: v1.5 llamaba a b.hash(),
+            // que recorre las 64 casillas en cada nodo con null-move.
+            b.zkey ^= zobrist_side();
+            if (saved_ep != NO_SQ) b.zkey ^= zobrist_ep(saved_ep);
             b.ep_square = NO_SQ;
             b.side = Color(b.side ^ 1);  // null move (cambio de lado)
-            b.zkey = b.hash();           // clave correcta de la posición tras el null-move
+            ctx.move_at_ply[ply] = 0;    // el null-move no es una jugada real
             Score null_sc = -negamax(b, depth - 1 - R, -beta, -beta + 1, ply + 1, ctx);
             b.side = Color(b.side ^ 1);  // restaurar lado
             b.ep_square = saved_ep;
@@ -358,13 +554,23 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
             ctx.rep.pop_back();
             if (ctx.stop) return (best == -INF) ? 0 : best;
             if (null_sc >= beta) {
-                // El rival no refuta: podamos. Guardamos en TT como cota.
+                // No devolver puntuaciones de mate procedentes de un null-move:
+                // el mate podría no existir sin la jugada nula.
+                if (null_sc >= MATE - 1000) null_sc = beta;
+                // Verificación a profundidad reducida en el zugzwang probable
+                // (finales con poco material), donde el null-move miente.
+                if (depth >= 8 && nonPawn <= 3) {
+                    Score v = negamax(b, depth - R - 1, beta - 1, beta, ply, ctx);
+                    if (ctx.stop) return (best == -INF) ? 0 : best;
+                    if (v < beta) goto nmp_failed;
+                }
                 if (!ctx.stop)
-                    tt_store(h, depth, score_to_tt(beta, ply), 0, 1);
-                return beta;
+                    tt_store(h, depth, score_to_tt(null_sc, ply), 0, 1);
+                return null_sc;
             }
         }
     }
+nmp_failed:;
 
     ctx.rep.push_back(h);
     int move_idx = 0;
@@ -391,7 +597,7 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
         }
 
         Undo u; b.make_move(m, u);
-        ctx.parent_move = m;
+        ctx.move_at_ply[ply] = m;
         // Extensión por jaque: solo extendemos el movimiento que DA jaque,
         // nunca la evasión.
         bool gives_check = b.in_check();
@@ -400,21 +606,38 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
         if (first) {
             sc = -negamax(b, depth - 1 + mext, -beta, -alpha, ply + 1, ctx);
         } else {
-            // Late Move Reductions: reduce pliegues de jugadas no-PV, no
-            // captura y que no dan jaque, tras los primeros movimientos.
+            // ---- Late Move Reductions (v1.6) ----
+            // Reducción logarítmica: crece con la profundidad y el orden de la
+            // jugada. v1.5 usaba 1-2 pliegues fijos y solo con FLAG_NORMAL, lo
+            // que excluía las promociones tranquilas (que NO deben reducirse) y
+            // reducía poco en profundidades altas.
             int reduction = 0;
-            if (depth >= 3 && !in_check && move_flag(m) == FLAG_NORMAL && !gives_check) {
-                reduction = 1;
-                if (move_idx > 4) reduction = 2;   // más reducción tras varias jugadas
+            if (depth >= 3 && move_idx >= 3 && is_quiet && !in_check && !gives_check) {
+                reduction = LMR_TABLE[std::min(depth, 63)][std::min(move_idx, 63)];
+                // Menos reducción en nodos PV y para jugadas con buen historial.
+                if (is_pv) reduction--;
+                Square ff = move_from(m), tt2 = move_to(m);
+                int hist = ctx.history[b.side ^ 1][ff][tt2];
+                if (hist > 8000) reduction--;
+                else if (hist < -8000) reduction++;
+                if (ctx.killers[ply][0] == m || ctx.killers[ply][1] == m) reduction--;
+                if (reduction < 0) reduction = 0;
+                if (reduction > depth - 2) reduction = depth - 2;
             }
-            if (reduction > 0) {
-                sc = -negamax(b, depth - 1 - reduction + mext, -alpha - 1, -alpha, ply + 1, ctx);
-                if (sc > alpha && sc < beta)
-                    sc = -negamax(b, depth - 1 + mext, -beta, -alpha, ply + 1, ctx);
-            } else {
+
+            // Búsqueda de ventana nula, reducida si procede.
+            sc = -negamax(b, depth - 1 - reduction + mext, -alpha - 1, -alpha, ply + 1, ctx);
+
+            // BUG CRÍTICO v1.5: la re-búsqueda se condicionaba a (sc < beta),
+            // imposible en un nodo no-PV donde beta == alpha+1, de modo que la
+            // reducción NUNCA se verificaba. v1.6 re-busca a profundidad
+            // completa en cuanto la jugada reducida supera alpha.
+            if (reduction > 0 && sc > alpha) {
                 sc = -negamax(b, depth - 1 + mext, -alpha - 1, -alpha, ply + 1, ctx);
-                if (sc > alpha && sc < beta)
-                    sc = -negamax(b, depth - 1 + mext, -beta, -alpha, ply + 1, ctx);
+            }
+            // Y si además abre la ventana en un nodo PV, se re-busca completa.
+            if (sc > alpha && sc < beta) {
+                sc = -negamax(b, depth - 1 + mext, -beta, -alpha, ply + 1, ctx);
             }
         }
         b.unmake_move(m, u);
@@ -432,17 +655,36 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
         if (sc > alpha) alpha = sc;
         first = false;
         if (alpha >= beta) {
-            if (move_flag(m) == FLAG_NORMAL && ply < 128) {
+            if (is_quiet && ply < 128) {
                 if (ctx.killers[ply][0] != m) {
                     ctx.killers[ply][1] = ctx.killers[ply][0];
                     ctx.killers[ply][0] = m;
                 }
-                // History: refuerza movimientos no-captura que causan cutoff.
+                // Countermove: registra esta jugada como refutación de la
+                // jugada anterior del rival.
+                if (ply > 0 && ctx.move_at_ply[ply - 1] != 0) {
+                    Move prev = ctx.move_at_ply[ply - 1];
+                    ctx.countermove[b.side][move_from(prev)][move_to(prev)] = m;
+                }
+                // History con DOBLE SIGNO (v1.6): premia la jugada que corta y
+                // penaliza las jugadas silenciosas ya probadas que fallaron.
+                // v1.5 solo premiaba, con lo que la tabla saturaba y perdía
+                // capacidad de discriminación.
+                int bonus = depth * depth;
+                if (bonus > 1200) bonus = 1200;
                 Square f = move_from(m), t = move_to(m);
                 if (f >= 0 && f < 64 && t >= 0 && t < 64) {
                     int& hh = ctx.history[b.side][f][t];
-                    hh += (depth * depth);
-                    if (hh > 1000000) hh = 1000000;
+                    hh += bonus - hh * bonus / 16384;      // actualización con decaimiento
+                }
+                for (int j = 0; j < mi; j++) {
+                    Move q = moves[j];
+                    if (move_flag(q) == FLAG_CAPTURE || move_flag(q) == FLAG_EP) continue;
+                    if (move_promo(q) != 0) continue;
+                    Square qf = move_from(q), qt = move_to(q);
+                    if (qf < 0 || qf > 63 || qt < 0 || qt > 63) continue;
+                    int& qh = ctx.history[b.side][qf][qt];
+                    qh += -bonus - qh * bonus / 16384;
                 }
             }
             break;
@@ -478,8 +720,29 @@ static Score root_search(Board& b, int depth, Score alpha, Score beta, Context& 
     for (int i = 0; i < moves.count; i++) {
         Move m = moves[i];
         Undo u; b.make_move(m, u);
-        Score sc = -negamax(b, depth - 1, -beta, -alpha, 1, ctx);
+        ctx.move_at_ply[0] = m;
+        // ---- PVS en la raíz (v1.6) ----
+        // v1.5 buscaba TODAS las jugadas de la raíz con ventana completa. Con
+        // PVS solo la primera usa ventana completa; el resto se refuta con
+        // ventana nula y solo se re-buscan si la superan.
+        Score sc;
+        if (i == 0) {
+            sc = -negamax(b, depth - 1, -beta, -alpha, 1, ctx);
+        } else {
+            sc = -negamax(b, depth - 1, -alpha - 1, -alpha, 1, ctx);
+            if (sc > alpha && sc < beta)
+                sc = -negamax(b, depth - 1, -beta, -alpha, 1, ctx);
+        }
         b.unmake_move(m, u);
+        // ---- Traza del árbol (depuración) ----
+        // Petición explícita de la revisión humana: poder inspeccionar qué
+        // valora el motor en cada jugada de la raíz.
+        if (g_tree_debug && !ctx.stop) {
+            std::cout << "info string tree depth " << depth
+                      << " move " << dbg_move_str(m)
+                      << " score " << sc
+                      << " nodes " << ctx.nodes << std::endl;
+        }
         if (ctx.stop) break;
         if (sc > best) {
             best = sc;
@@ -506,12 +769,19 @@ static Score root_search(Board& b, int depth, Score alpha, Score beta, Context& 
 
 SearchResult search(Board& b, const SearchLimits& lim) {
     tt_init();
+    init_lmr_table();
+    tt_new_search();                 // envejece la TT: nueva jugada real
     Context ctx{};
     // Reinicia la heuristica de historia para esta búsqueda.
     std::memset(ctx.history, 0, sizeof(ctx.history));
+    std::memset(ctx.countermove, 0, sizeof(ctx.countermove));
+    std::memset(ctx.move_at_ply, 0, sizeof(ctx.move_at_ply));
     ctx.start_ms = now_ms();
     ctx.time_ms = lim.time_ms;
+    ctx.max_time_ms = lim.max_time_ms > 0 ? lim.max_time_ms : lim.time_ms;
     ctx.has_time_limit = (lim.time_ms > 0);
+    ctx.root_halfmove = b.halfmove;
+    if (lim.ponder) set_pondering(true);
     SearchResult res;
     res.best = 0; res.score = 0; res.depth = 0; res.nodes = 0;
 
@@ -552,13 +822,34 @@ SearchResult search(Board& b, const SearchLimits& lim) {
         bm = cur;
         prev_score = sc;
         res.best = bm; res.score = sc; res.depth = d; res.nodes = ctx.nodes;
+        // Jugada de ponder: segundo movimiento de la PV.
+        res.ponder = (ctx.pv_len[0] >= 2) ? ctx.pv_table[0][1] : 0;
         if (lim.on_info) {
             std::vector<Move> pv;
             for (int i = 0; i < ctx.pv_len[0]; i++) pv.push_back(ctx.pv_table[0][i]);
             lim.on_info(d, sc, ctx.nodes, now_ms() - ctx.start_ms, pv);
         }
-        if (sc > MATE - 1000 || sc < -MATE + 1000) break; // mate encontrado
+        // ---- Parada por mate (v1.6) ----
+        // v1.5 detenía la ID al hallar CUALQUIER mate, congelando p. ej. un
+        // mate en 5 sin buscar el mate en 2 que aparecería más adelante.
+        // v1.6 solo se detiene cuando la profundidad ya basta para demostrar
+        // el mate encontrado (no hay margen para acortarlo).
+        if (sc > MATE - 1000) {
+            int mate_in = (MATE - sc + 1) / 2;
+            if (d >= mate_in * 2) break;       // mate ya demostrado; no acortable
+        } else if (sc < -MATE + 1000) {
+            break;                             // estamos perdidos: nada que ganar
+        }
+        // ---- Gestión del tiempo (v1.6) ----
+        // No iniciar una iteración que casi con seguridad no terminará: cada
+        // profundidad cuesta ~2x la anterior. v1.5 arrancaba iteraciones que
+        // luego abortaba, sobrepasando el presupuesto asignado.
+        if (ctx.has_time_limit && !g_pondering.load(std::memory_order_relaxed)) {
+            int64_t elapsed = now_ms() - ctx.start_ms;
+            if (elapsed * 2 >= ctx.time_ms) break;
+        }
     }
+    if (lim.ponder) set_pondering(false);
     if (res.best == 0) {
         // No se halló mejor jugada (p.ej. la búsqueda fue interrumpida antes de
         // completar la primera iteración de la raíz). Nunca devolver 0 si existe

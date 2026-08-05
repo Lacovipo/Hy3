@@ -39,10 +39,16 @@ static Move uci_to_move(const Board& b, const std::string& s) {
 static void run_search(SearchLimits lim, Board board) {
     g_last_result = search(board, lim);
     g_best_move = g_last_result.best;
-    if (g_best_move != 0)
-        std::cout << "bestmove " << move_to_uci(g_best_move) << std::endl;
-    else
+    if (g_best_move != 0) {
+        std::cout << "bestmove " << move_to_uci(g_best_move);
+        // Sugerencia de ponder: segundo movimiento de la PV. Permite al GUI
+        // arrancar 'go ponder' en la respuesta esperada del rival.
+        if (g_last_result.ponder != 0)
+            std::cout << " ponder " << move_to_uci(g_last_result.ponder);
+        std::cout << std::endl;
+    } else {
         std::cout << "bestmove 0000" << std::endl;
+    }
     g_searching = false;
 }
 
@@ -71,6 +77,8 @@ int main() {
             std::cout << "id name " << ENGINE_ID << "\n";
             std::cout << "id author " << ENGINE_NAME << "\n";
             std::cout << "option name Hash type spin default 64 min 1 max 4096\n";
+            std::cout << "option name Ponder type check default false\n";
+            std::cout << "option name Clear Hash type button\n";
             std::cout << "uciok\n";
         } else if (cmd == "setoption") {
             // formato: setoption name <Nombre> [value <Valor>]
@@ -79,7 +87,14 @@ int main() {
                 if (tok == "name") { std::string w; while (iss >> w && w != "value") { if (!name.empty()) name += " "; name += w; } if (w == "value") { std::string v; while (iss >> v) { if (!value.empty()) value += " "; value += v; } } }
             }
             if (name == "Hash") {
+                // CRÍTICO: redimensionar la TT mientras el hilo de búsqueda la
+                // está leyendo liberaba la memoria bajo sus pies (use-after-free).
+                // v1.6 detiene y espera a la búsqueda antes de tocar la tabla.
+                if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); g_searching = false; }
                 try { int mb = std::stoi(value); tt_resize(mb); } catch (...) {}
+            } else if (name == "Clear Hash") {
+                if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); g_searching = false; }
+                tt_clear();
             }
         } else if (cmd == "isready") {
             std::cout << "readyok\n";
@@ -105,21 +120,41 @@ int main() {
             lim.max_depth = 64;
             lim.time_ms = 0; // sin límite por defecto; se override con movetime/etc
             bool has_time = false;
+            bool has_depth = false;      // el usuario pidió 'depth N'
+            bool is_infinite = false;    // el usuario pidió 'infinite'
+            bool is_ponder = false;      // el usuario pidió 'ponder'
             int64_t movetime = 0;
             int64_t wtime = 0, btime = 0, winc = 0, binc = 0;
             int movestogo = 0;
             std::string token;
             while (iss >> token) {
-                if (token == "depth") { if (iss >> token) lim.max_depth = std::stoi(token); }
+                if (token == "depth") { if (iss >> token) { lim.max_depth = std::stoi(token); has_depth = true; } }
                 else if (token == "movetime") { if (iss >> token) { movetime = std::stoll(token); has_time = true; } }
                 else if (token == "wtime") { if (iss >> token) wtime = std::stoll(token); }
                 else if (token == "btime") { if (iss >> token) btime = std::stoll(token); }
                 else if (token == "winc") { if (iss >> token) winc = std::stoll(token); }
                 else if (token == "binc") { if (iss >> token) binc = std::stoll(token); }
                 else if (token == "movestogo") { if (iss >> token) movestogo = std::stoi(token); }
-                else if (token == "infinite") { lim.time_ms = 0; lim.max_depth = 64; has_time = false; }
+                else if (token == "infinite") { is_infinite = true; }
+                else if (token == "ponder")   { is_ponder = true; }
+                else if (token == "mate")     { if (iss >> token) { lim.max_depth = std::stoi(token) * 2; has_depth = true; } }
+                else if (token == "nodes")    { if (iss >> token) { /* aceptado, no limitante */ } }
+                else if (token == "searchmoves") { /* no soportado: se ignora */ }
             }
-            if (movetime > 0) { lim.time_ms = movetime; has_time = true; }
+            if (is_infinite) {
+                // 'infinite': buscar hasta 'stop'. Sin límite de tiempo ni de
+                // profundidad efectiva.
+                lim.time_ms = 0;
+                if (!has_depth) lim.max_depth = 64;
+                has_time = false;
+            }
+            else if (movetime > 0) {
+                // Reservar un pequeño margen para no sobrepasar el movetime
+                // exacto que exige el árbitro.
+                lim.time_ms = std::max<int64_t>(5, movetime - 15);
+                lim.max_time_ms = movetime;
+                has_time = true;
+            }
             else if (wtime > 0 || btime > 0) {
                 int64_t mytime = (g_board.side == WHITE) ? wtime : btime;
                 int64_t myinc = (g_board.side == WHITE) ? winc : binc;
@@ -130,19 +165,33 @@ int main() {
                 // dejar margen de seguridad y nunca exceder el reloj disponible
                 int64_t max_allowed = std::max<int64_t>(10, mytime - 20);
                 lim.time_ms = std::min<int64_t>(budget * 9 / 10, max_allowed);
+                lim.max_time_ms = std::min<int64_t>(budget * 3, max_allowed);
                 has_time = true;
             }
-            if (!has_time) { lim.time_ms = 1000; lim.max_depth = 4; } // fallback seguro
+            // BUG CRÍTICO v1.5: este fallback se aplicaba TAMBIÉN cuando el
+            // usuario había pedido 'depth N' o 'infinite', capando la búsqueda
+            // a profundidad 4. Ahora solo actúa si 'go' no trae ningún límite.
+            if (!has_time && !has_depth && !is_infinite) {
+                lim.time_ms = 1000;
+                lim.max_depth = 64;
+            }
+            lim.ponder = is_ponder;
 
             // Reportar PV en cada iteración (formato UCI "info ... pv ...")
             lim.on_info = [](int depth, Score score, uint64_t nodes, int64_t time_ms, const std::vector<Move>& pv) {
-                std::cout << "info depth " << depth << " nodes " << nodes << " time " << time_ms << " ";
-                if (score > MATE - 1000)      std::cout << "score mate " << ((MATE - score) / 2);
-                else if (score < -MATE + 1000) std::cout << "score mate " << -((MATE + score) / 2);
+                std::cout << "info depth " << depth << " nodes " << nodes << " time " << time_ms;
+                // Nodos por segundo (los GUIs lo esperan).
+                if (time_ms > 0) std::cout << " nps " << (nodes * 1000 / (uint64_t)time_ms);
+                std::cout << " ";
+                // Notación de mate UCI: 'mate N' cuenta JUGADAS COMPLETAS y el
+                // mate inmediato es 'mate 1', no 'mate 0'. v1.5 emitía
+                // (MATE - score)/2, que daba 0 para un mate en 1.
+                if (score > MATE - 1000)       std::cout << "score mate " << ((MATE - score + 1) / 2);
+                else if (score < -MATE + 1000) std::cout << "score mate " << -((MATE + score + 1) / 2);
                 else                           std::cout << "score cp " << score;
                 std::cout << " pv";
                 for (Move m : pv) std::cout << " " << move_to_uci(m);
-                std::cout << "\n";
+                std::cout << std::endl;   // los GUIs necesitan vaciado inmediato
             };
 
             if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); }
@@ -155,6 +204,21 @@ int main() {
             if (g_search_thread.joinable()) g_search_thread.join();
             g_searching = false;
             // bestmove ya se imprimió al terminar el hilo
+        } else if (cmd == "ponderhit") {
+            // El rival jugó la jugada que estábamos ponderando: la búsqueda en
+            // curso pasa a contar contra nuestro reloj y termina normalmente.
+            ponder_hit();
+        } else if (cmd == "tree") {
+            // Extensión (no UCI) pedida en la revisión humana: traza el árbol
+            // de la raíz. Uso: 'tree on [prof]' / 'tree off'.
+            std::string arg; iss >> arg;
+            if (arg == "off") { set_tree_debug(false, 0); std::cout << "info string tree debug OFF\n"; }
+            else {
+                int d = 3; std::string dp;
+                if (iss >> dp) { try { d = std::stoi(dp); } catch (...) {} }
+                set_tree_debug(true, d);
+                std::cout << "info string tree debug ON (max depth " << d << ")\n";
+            }
         } else if (cmd == "quit" || cmd == "exit") {
             signal_stop();
             if (g_search_thread.joinable()) g_search_thread.join();
