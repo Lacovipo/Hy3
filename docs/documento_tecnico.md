@@ -1,6 +1,6 @@
-# Documentación Técnica del Motor de Ajedrez Hy3 (v1.6)
+# Documentación Técnica del Motor de Ajedrez Hy3 (v1.7)
 
-Este documento contiene un análisis técnico exhaustivo de la arquitectura, diseño de módulos, estructuras de datos, representación de tablero, generador de movimientos, algoritmo de búsqueda y protocolo de comunicación del motor de ajedrez **Hy3 (versión 1.6)**.
+Este documento contiene un análisis técnico exhaustivo de la arquitectura, diseño de módulos, estructuras de datos, representación de tablero, generador de movimientos, algoritmo de búsqueda y protocolo de comunicación del motor de ajedrez **Hy3 (versión 1.7)**.
 
 ---
 
@@ -315,3 +315,43 @@ La versión 1.6 es la respuesta a **12 revisiones externas** (`Rev_*.md` en `doc
 - **Fuerza de juego (match v1.6 vs v1.5)**: 20 partidas a 300 ms/jugada con libro mínimo y alternancia de colores → **v1.6 domina** (cuadro completo al final del match). El incremento de fuerza procede de la combinación de los 20 puntos de la §6.1, no de un único cambio.
 
 Compilación de release con **vinculación dinámica** (en adelante el binario depende de `libstdc++-6.dll` / `libgcc_s_seh-1.dll` del toolchain en lugar de empotrarlos): `g++ -O2 -std=c++17 -shared-libgcc -shared-libstdc++ -o Hy3_1.6.exe board.cpp movegen.cpp eval.cpp search.cpp uci.cpp`.
+
+---
+
+## 7. Cambios de la versión 1.7
+
+La versión 1.7 es la respuesta al informe de solidez funcional `docs/PARA_EL_AUTOR_DEL_MOTOR.md` (generado por el analizador Camifurlo v1.0.0 sobre Hy3 1.6). El análisis sometió al motor a una batería de pruebas de protocolo, tiempo, ponder, ciclo de vida y partidas reales, y detectó **8 desviaciones** de la especificación UCI: 4 de prioridad ALTA y 4 de prioridad BAJA. Todas se han corregido en el código fuente. Cada entrada indica el síntoma observado, la causa y el cambio aplicado.
+
+| # | Problema | Área | Cambio aplicado |
+|---|---|---|---|
+| 1 | El ponder cuenta el tiempo como propio → llega tarde tras `ponderhit` (y causa pérdidas por tiempo solo con ponder) | `search.cpp` | El reloj propio **arranca en el `ponderhit`**: el tiempo de ponder se acumula en `g_ponder_offset` y se resta del tiempo transcurrido, de modo que el tiempo pensado gratis (del rival) no se descuenta del reloj propio. |
+| 2 | Sobrepaso grave del tiempo asignado (hasta 1,88× el `movetime`) | `search.cpp` | **Tope DURO** dentro de `time_up()`: aborta la iteración en curso al superar `max_time_ms` y devuelve la mejor jugada hallada hasta ese momento. Antes solo se comprobaba el tiempo *entre* iteraciones. |
+| 3 | `bestmove` fantasma: dos `bestmove` por un solo `go` | `uci.cpp` | Se **ignora un `go` que llegue con una búsqueda en curso** (invariante: exactamente un `bestmove` por `go`). Además se **suprime** el `bestmove` cuando la búsqueda se aborta por `position` / `ucinewgame` / `setoption` / `quit`. |
+| 4 | Pérdidas por tiempo (agota el reloj antes de devolver la jugada) | `uci.cpp` / `search.cpp` | Presupuesto recalculado en cada jugada a partir de `wtime` / `btime` del `go`, con tope blando ≤ 1/3 del tiempo restante y **techo duro = reloj − 10 ms**, de modo que el motor siempre devuelve la jugada antes de caer la bandera. |
+| 5 | Quedan procesos hijos vivos tras cerrar el motor | `uci.cpp` | En Windows se crea un **Job Object** con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` y se asigna el proceso, para que cualquier hijo muera con el padre. (Medida defensiva: el motor no lanza subprocesos, pero cumple la recomendación del informe.) |
+| 6 | No procesa el resto de la línea tras un token desconocido | `uci.cpp` | El bucle principal **descarta tokens iniciales desconocidos** hasta encontrar un comando válido (`joho isready` → `readyok`). |
+| 7 | `go` sin parámetros termina por su cuenta | `uci.cpp` | `go` sin límites se trata como **búsqueda infinita hasta `stop`** (antes devolvía una jugada a los ~687 ms). |
+| 8 | Acepta un FEN sintácticamente inválido | `board.cpp` / `uci.cpp` | Nueva `validate_fen()` (6 campos, 8 filas que suman 8 casillas, un rey por bando, turno y casilla al paso coherentes). Ante un FEN inválido se **conserva la posición anterior** y se avisa con `info string Invalid FEN ignored: <razón>`. |
+
+### 7.1. Detalles de implementación
+
+- **Ponder (Fix #1)**: `set_pondering(true)` registra `g_ponder_start` y pone `g_ponder_offset` a 0; `ponder_hit()` (y la finalización de la búsqueda) llaman a `end_ponder()`, que suma a `g_ponder_offset` el tiempo transcurrido en ponder. `time_up()` y el corte entre iteraciones usan `effective_elapsed() = now − start − g_ponder_offset`, de modo que tras el `ponderhit` el reloj efectivo arranca de cero.
+- **Tope de tiempo (Fix #2 / #4)**: en el `go` de UCI, para `movetime` se fija `max_time_ms = movetime − 5 ms` y `time_ms = movetime − 25 ms`; para `wtime`/`btime` se calcula `soft = min(presupuesto, 1/3·reloj)` (mínimo 20 ms) y `hard = min(reloj − 10, 4·cap)` garantizando `hard ≤ reloj − 10`, de forma que el motor nunca puede caer en bandera. `time_up()` aborta en cuanto se supera `max_time_ms`.
+- **Job Object (Fix #5)**: `attach_job_object()` se invoca al arrancar `main()` y falla silenciosamente si el proceso ya pertenece a otro job (p. ej. un supervisor).
+
+Compilación de release (MSVC): `build_release.bat` → `Hy3 1.7.exe` (`cl /EHsc /O2 /std:c++17 /I src ...`). El índice de la tabla de transposición usa `_umul128` en MSVC y `unsigned __int128` en el resto de plataformas (el mapeo de claves es idéntico).
+
+### 7.2. Verificación
+
+Batería funcional `tests/verify_v17.py` (10/10) que reproduce los escenarios del informe:
+
+- `uci` → `id name Hy3 1.7`.
+- `joho isready` → `readyok` (Fix #6).
+- Doble `go movetime 400` → exactamente **1** `bestmove` (Fix #3).
+- Seis FEN inválidos → `info string Invalid FEN ignored: …` y la posición previa se conserva (Fix #8).
+- `go movetime 1000` → `bestmove` en ≤ 1,35 s (sin sobrepaso; Fix #2).
+- `go wtime 1000 btime 1000` → `bestmove` en ≤ 1,05 s (no supera el reloj; Fix #4).
+- `go` (sin parámetros) no emite `bestmove` hasta `stop` (Fix #7).
+- `go ponder …` + `ponderhit` → `bestmove` correcto (Fix #1).
+- `quit` → el proceso termina con código 0 sin dejar procesos hijos (Fix #5).
+

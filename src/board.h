@@ -77,6 +77,11 @@ struct Board {
     bool is_valid() const { return king_sq[WHITE] != NO_SQ && king_sq[BLACK] != NO_SQ; }
 };
 
+// Valida un FEN sintácticamente (campos, 8 filas que suman 8 casillas, un rey
+// por bando, turno válido y casilla al paso coherente). Devuelve true si es
+// válido; si no, escribe en 'err' la razón. No modifica el tablero. (Fix #8)
+bool validate_fen(const std::string& fen, std::string& err);
+
 // (Depuración) contadores de make/unmake
 void debug_counts(long& mk, long& um);
 

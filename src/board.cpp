@@ -665,4 +665,72 @@ int Board::see_move(Move m) const {
 uint64_t zobrist_side() { return ZOB_SIDE; }
 uint64_t zobrist_ep(Square s) { return (s >= 0 && s < 64) ? ZOB_EP[s] : 0ULL; }
 
+// ---------------------------------------------------------------------------
+// Validación de FEN (Fix PARA_EL_AUTOR #8)
+// Comprueba la sintaxis mínima que debe cumplir un FEN para ser buscable:
+//   6 campos, 8 filas que suman 8 casillas cada una, exactamente un rey por
+//   bando, turno 'w'/'b', enroque con KQkq o '-', y casilla al paso en la fila
+//   3 o 6 (o '-'). Ante cualquier fallo escribe la razón en 'err'.
+// ---------------------------------------------------------------------------
+bool validate_fen(const std::string& fen, std::string& err) {
+    err.clear();
+    std::istringstream iss(fen);
+    std::string field[6];
+    int n = 0;
+    while (iss >> field[n] && n < 6) n++;
+    if (n < 6) { err = "se esperaban 6 campos, se encontraron " + std::to_string(n); return false; }
+
+    int kings[2] = { 0, 0 };   // [0]=blanco, [1]=negro
+    int row = 0, col = 0;
+    const std::string& placement = field[0];
+    for (size_t i = 0; i < placement.size(); i++) {
+        char c = placement[i];
+        if (c == '/') {
+            if (col != 8) { err = "la fila " + std::to_string(row) + " no suma 8 casillas"; return false; }
+            row++; col = 0;
+            if (row > 7) { err = "hay mas de 8 filas"; return false; }
+        } else if (c >= '1' && c <= '8') {
+            col += (c - '0');
+            if (col > 8) { err = "la fila " + std::to_string(row) + " desborda el tablero"; return false; }
+        } else {
+            char lc = (char)std::tolower((unsigned char)c);
+            if (!(lc == 'p' || lc == 'n' || lc == 'b' || lc == 'r' || lc == 'q' || lc == 'k')) {
+                err = std::string("pieza no valida: '") + c + "'";
+                return false;
+            }
+            if (lc == 'k') kings[(c == 'k') ? 0 : 1]++;
+            col++;
+            if (col > 8) { err = "la fila " + std::to_string(row) + " desborda el tablero"; return false; }
+        }
+    }
+    if (row != 7) { err = "el FEN debe tener 8 filas"; return false; }
+    if (col != 8) { err = "la ultima fila no suma 8 casillas"; return false; }
+    if (kings[0] != 1 || kings[1] != 1) {
+        err = "debe haber exactamente un rey por bando (encontrados " +
+              std::to_string(kings[0]) + " blancos, " + std::to_string(kings[1]) + " negros)";
+        return false;
+    }
+    if (field[1] != "w" && field[1] != "b") { err = "turno invalido (debe ser 'w' o 'b')"; return false; }
+    for (char c : field[2]) {
+        if (c != 'K' && c != 'Q' && c != 'k' && c != 'q' && c != '-') {
+            err = std::string("derechos de enroque invalidos: '") + c + "'";
+            return false;
+        }
+    }
+    if (field[3] != "-") {
+        if (field[3].size() != 2) { err = "casilla al paso invalida"; return false; }
+        char f = field[3][0], r = field[3][1];
+        if (f < 'a' || f > 'h' || (r != '3' && r != '6')) {
+            err = "casilla al paso absurda (debe estar en la fila 3 o 6)";
+            return false;
+        }
+        // El peón que acaba de mover al paso debe pertenecer al bando que NO
+        // mueve; por tanto la casilla ep debe estar en la fila opuesta al turno.
+        bool white_to_move = (field[1] == "w");
+        if (white_to_move && r != '6') { err = "casilla al paso incoherente con el turno"; return false; }
+        if (!white_to_move && r != '3') { err = "casilla al paso incoherente con el turno"; return false; }
+    }
+    return true;
+}
+
 } // namespace hy3

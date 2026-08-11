@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#if defined(_MSC_VER) && defined(_WIN64)
+#include <intrin.h>   // _umul128 para el índice de la TT (tt_idx)
+#endif
 
 namespace hy3 {
 
@@ -96,9 +99,16 @@ static void tt_init() {
 void tt_resize(int mb) { tt_alloc(mb); }
 
 // Mapea la clave al rango [0, TT_BUCKETS) sin módulo: toma los 64 bits altos
-// del producto de 128 bits h * TT_BUCKETS.
+// del producto de 128 bits h * TT_BUCKETS. Portable: MSVC no soporta __int128,
+// así que en esa plataforma usa la intrínseca _umul128.
 static inline size_t tt_idx(uint64_t h) {
+#if defined(_MSC_VER) && defined(_WIN64)
+    uint64_t hi;
+    _umul128(h, (uint64_t)TT_BUCKETS, &hi);
+    return (size_t)hi;
+#else
     return (size_t)(((unsigned __int128)h * (unsigned __int128)TT_BUCKETS) >> 64);
+#endif
 }
 
 // Avanza la generación de la TT (una por jugada real, no por iteración).
@@ -213,14 +223,32 @@ static int64_t now_ms() {
 static std::atomic<bool> g_stop_flag{false};
 static std::atomic<bool> g_pondering{false};
 static std::atomic<int64_t> g_ponder_start{0};
+// Tiempo de ponder "gratis" (del rival) que no debe descontarse del reloj propio.
+// Se acumula mientras se pondera y se resta del tiempo transcurrido para que el
+// reloj propio arranque de verdad en el 'ponderhit'. (Fix PARA_EL_AUTOR #1 / #4)
+static std::atomic<int64_t> g_ponder_offset{0};
 
-void set_pondering(bool on) {
-    g_pondering.store(on, std::memory_order_relaxed);
-    if (on) g_ponder_start.store(now_ms(), std::memory_order_relaxed);
+static void end_ponder() {
+    if (g_pondering.load(std::memory_order_relaxed)) {
+        g_ponder_offset.fetch_add(now_ms() - g_ponder_start.load(std::memory_order_relaxed),
+                                  std::memory_order_relaxed);
+        g_pondering.store(false, std::memory_order_relaxed);
+    }
 }
 
-// El GUI confirmó la jugada ponderada: dejamos de ignorar el reloj.
-void ponder_hit() { g_pondering.store(false, std::memory_order_relaxed); }
+void set_pondering(bool on) {
+    if (on) {
+        g_pondering.store(true, std::memory_order_relaxed);
+        g_ponder_start.store(now_ms(), std::memory_order_relaxed);
+        g_ponder_offset.store(0, std::memory_order_relaxed);
+    } else {
+        end_ponder();
+    }
+}
+
+// El GUI confirmó la jugada ponderada: el tiempo de ponder fue gratis; el reloj
+// propio empieza a correr ahora mismo. (Fix PARA_EL_AUTOR #1)
+void ponder_hit() { end_ponder(); }
 
 // ---- Traza del árbol de búsqueda (depuración) ----
 static bool g_tree_debug = false;
@@ -230,13 +258,24 @@ void set_tree_debug(bool on, int max_depth_print) {
     g_tree_max_depth = max_depth_print;
 }
 
+// Tiempo efectivamente consumido del reloj propio: descuenta el ponder gratis.
+static int64_t effective_elapsed(Context& ctx) {
+    return now_ms() - ctx.start_ms - g_ponder_offset.load(std::memory_order_relaxed);
+}
+
 static bool time_up(Context& ctx) {
     if (ctx.stop) return true;
     if (g_stop_flag.load(std::memory_order_relaxed)) { ctx.stop = true; return true; }
     // En ponder el reloj propio no corre: seguimos pensando hasta stop/ponderhit.
     if (g_pondering.load(std::memory_order_relaxed)) return false;
     if (!ctx.has_time_limit) return false;
-    if (now_ms() - ctx.start_ms >= ctx.time_ms) { ctx.stop = true; return true; }
+    int64_t elapsed = effective_elapsed(ctx);
+    // Tope DURO: aborta la iteración en curso si se supera el techo y devuelve
+    // la mejor jugada hallada hasta ahora. Evita sobrepasar el tiempo asignado
+    // (Fix PARA_EL_AUTOR #2 / #4).
+    if (elapsed >= ctx.max_time_ms) { ctx.stop = true; return true; }
+    // Tope blando: señal para no iniciar otra iteración en el bucle de ID.
+    if (elapsed >= ctx.time_ms) { ctx.stop = true; return true; }
     return false;
 }
 
@@ -845,7 +884,7 @@ SearchResult search(Board& b, const SearchLimits& lim) {
         // profundidad cuesta ~2x la anterior. v1.5 arrancaba iteraciones que
         // luego abortaba, sobrepasando el presupuesto asignado.
         if (ctx.has_time_limit && !g_pondering.load(std::memory_order_relaxed)) {
-            int64_t elapsed = now_ms() - ctx.start_ms;
+            int64_t elapsed = effective_elapsed(ctx);
             if (elapsed * 2 >= ctx.time_ms) break;
         }
     }

@@ -310,3 +310,23 @@ python camifurlo.py --motor "<ruta>" --protocolo u --fases CG   # tiempo y parti
 ```
 
 _Generado por Camifurlo v1.0.0 el 2026-08-09._
+
+---
+
+## Estado resuelto en Hy3 1.7
+
+Los 8 hallazgos de este informe fueron corregidos en el código fuente y verificados
+con `tests/verify_v17.py` (10/10). Resumen:
+
+| # | Problema | Estado | Cambio |
+|---|---|---|---|
+| 1 | Ponder cuenta el tiempo como propio | ✅ Resuelto | El reloj arranca en `ponderhit` (`g_ponder_offset` en `search.cpp`). |
+| 2 | Sobrepaso grave del tiempo | ✅ Resuelto | Tope duro `max_time_ms` dentro de `time_up()`. |
+| 3 | `bestmove` fantasma (varios por `go`) | ✅ Resuelto | Se ignora `go` en curso; se suprime `bestmove` en abortos por `position`/`ucinewgame`/`setoption`/`quit`. |
+| 4 | Pérdidas por tiempo | ✅ Resuelto | Presupuesto desde `wtime`/`btime` con techo duro = reloj − 10 ms. |
+| 5 | Procesos hijos huérfanos | ✅ Resuelto (defensivo) | Job Object `KILL_ON_JOB_CLOSE` en Windows. |
+| 6 | No procesa tras token desconocido | ✅ Resuelto | El bucle principal descarta tokens iniciales desconocidos. |
+| 7 | `go` sin parámetros termina solo | ✅ Resuelto | `go` sin límites = búsqueda infinita hasta `stop`. |
+| 8 | Acepta FEN inválido | ✅ Resuelto | `validate_fen()` rechaza FEN malformados conservando la posición previa. |
+
+El motor compilado para release es `Hy3 1.7.exe` (MSVC, `build_release.bat`).

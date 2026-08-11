@@ -2,3 +2,6 @@
 *.bat
 /extra
 /tests
+/.workbuddy-ai
+*.obj
+*.exe
