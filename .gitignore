@@ -1,0 +1,4 @@
+*.obj
+*.bat
+/extra
+/tests
