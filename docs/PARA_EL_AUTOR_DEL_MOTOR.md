@@ -1,4 +1,4 @@
-# Informe para el autor de Hy3 1.6
+# Informe para el autor de Hy3 1.7
 
 ## Que es esto y como usarlo
 
@@ -12,145 +12,88 @@ A diferencia del informe principal (que explica como debe *sortear* estos proble
 
 | Campo | Valor |
 |---|---|
-| Nombre declarado | Hy3 1.6 |
+| Nombre declarado | Hy3 1.7 |
 | Autor declarado | Hy3 |
 | Protocolo analizado | uci |
-| Ejecutable | Hy3 1.6.exe |
-| MD5 | cb7ab628c5ffcbcc05a974aa6b03939c |
-| Fecha del analisis | 2026-08-09 19:22:13 |
-| Duracion de la bateria | 64.4 minutos |
+| Ejecutable | Hy3 1.7.exe |
+| MD5 | ed614532f151dd46e6b54e852c5c5e70 |
+| Fecha del analisis | 2026-08-12 03:33:34 |
+| Duracion de la bateria | 349.6 minutos |
 | Partidas jugadas | 77 |
-| Pruebas superadas | 100 |
+| Pruebas superadas | 98 |
 
 ## Resumen de lo que hay que arreglar
 
 | # | Prioridad | Esfuerzo | Area del codigo | Problema |
 |---|---|---|---|---|
-| 1 | 🟠 ALTA | trivial | modo ponder | El motor cuenta el tiempo de ponder como tiempo propio |
-| 2 | 🟠 ALTA | medio | gestion del tiempo de busqueda | El motor sobrepasa gravemente el tiempo asignado |
-| 3 | 🟠 ALTA | medio | bucle principal de entrada/salida (lectura de stdin) | El motor emite 'bestmove' sin que se le haya pedido |
-| 4 | 🟠 ALTA | medio | gestion del tiempo de busqueda | El motor pierde por tiempo |
-| 5 | 🟠 ALTA | medio | terminacion del proceso | Quedan procesos hijos vivos despues de cerrar el motor |
-| 6 | 🔵 BAJA | trivial | bucle principal de entrada/salida (lectura de stdin) | No procesa el resto de la linea tras un token desconocido |
-| 7 | 🔵 BAJA | trivial | gestion del tiempo de busqueda | 'go' sin parametros termina por su cuenta |
-| 8 | 🔵 BAJA | medio | parseo de posiciones (FEN y lista de jugadas) | El motor acepta un FEN sintacticamente invalido |
+| 1 | 🔴 CRITICA | medio | bucle de busqueda | El motor no devuelve 'bestmove' |
+| 2 | 🟠 ALTA | medio | gestion del tiempo de busqueda | El motor pierde por tiempo |
+| 3 | 🟡 MEDIA | trivial | gestion del tiempo de busqueda | 'go' sin parametros se comporta como busqueda infinita |
+| 4 | 🟡 MEDIA | medio | gestion del tiempo de busqueda | La busqueda no termina por si sola en el plazo previsto |
+| 5 | 🔵 BAJA | medio | gestion del tiempo de busqueda | El motor ignora 'go nodes N' |
+| 6 | 🔵 BAJA | medio | parseo de posiciones (FEN y lista de jugadas) | El motor acepta un FEN sintacticamente invalido |
 
-**Por donde empezar**: 3 de estos 8 arreglos son de esfuerzo trivial, de unas pocas lineas — El motor cuenta el tiempo de ponder como tiempo propio; No procesa el resto de la linea tras un token desconocido; 'go' sin parametros termina por su cuenta.
+**Por donde empezar**: 1 de estos 6 arreglos son de esfuerzo trivial, de unas pocas lineas — 'go' sin parametros se comporta como busqueda infinita.
 
 ## Detalle
 
-### 1. El motor cuenta el tiempo de ponder como tiempo propio
+### 1. El motor no devuelve 'bestmove'
 
 | Campo | Valor |
 |---|---|
-| Prioridad | 🟠 ALTA |
-| Esfuerzo estimado | trivial |
-| Donde mirar | modo ponder |
-| Veces observado | 1 |
-| Codigo del comportamiento | `ponder_gasta_reloj` |
-| Pruebas que lo detectaron | `D09_reloj_ponder` |
-
-**Sintoma y por que importa**: Tras un ponderhit, consume el tiempo que ya habia gastado ponderando y llega tarde. ES LA CAUSA CLASICA de que un motor pierda por tiempo SOLO cuando se activa el ponder.
-
-**Comportamiento correcto**: El reloj empieza a correr en el 'ponderhit'.
-
-**Lo que hizo este motor**:
-
-```
-con el mismo reloj (6 s) una busqueda normal tarda 188 ms, pero tras ponderhit con 2,5 s de ponder devuelve en 0 ms
-```
-
-**Causa habitual**: El cronometro se arranca al empezar a ponderar, no al recibir 'ponderhit', asi que el tiempo pensado gratis se descuenta del propio reloj.
-
-**Cambio sugerido**: Reiniciar la marca de tiempo en el 'ponderhit'. El tiempo de ponder es gratis por definicion: es tiempo del rival.
-
-<sub>Mientras no se arregle, la GUI tiene que: Desactivar el ponder para este motor, o comunicarle un reloj reducido tras un ponderhit.</sub>
-
-### 2. El motor sobrepasa gravemente el tiempo asignado
-
-| Campo | Valor |
-|---|---|
-| Prioridad | 🟠 ALTA |
+| Prioridad | 🔴 CRITICA |
 | Esfuerzo estimado | medio |
-| Donde mirar | gestion del tiempo de busqueda |
-| Veces observado | 1 |
-| Codigo del comportamiento | `sobrepaso_tiempo_grave` |
-| Pruebas que lo detectaron | `C_bala_1s` |
+| Donde mirar | bucle de busqueda |
+| Veces observado | 2 |
+| Codigo del comportamiento | `bestmove_ausente` |
+| Pruebas que lo detectaron | `F04_position_buscando`, `F05_setoption_buscando` |
 
-**Sintoma y por que importa**: Sobrepasos superiores al 50%: con este control de tiempo pierde partidas por bandera de forma sistematica.
+**Sintoma y por que importa**: La busqueda termina (o no) sin la linea obligatoria 'bestmove'. La partida se queda parada para siempre.
 
-**Comportamiento correcto**: Consumo <= tiempo asignado.
-
-**Lo que hizo este motor**:
-
-```
-con 1s a caer bandera llego a gastar 1.88x el tiempo razonable para la jugada
-```
-
-**Causa habitual**: No hay tope duro: solo se comprueba el tiempo entre iteraciones, asi que una iteracion larga se lleva por delante todo el reloj.
-
-**Cambio sugerido**: Dos limites: uno 'blando' para no empezar otra iteracion y otro 'duro' que aborta la busqueda en curso desde dentro (comprobando cada pocos miles de nodos) y devuelve la mejor jugada que se tenga. Nunca gastar mas del tiempo restante menos el margen.
-
-<sub>Mientras no se arregle, la GUI tiene que: Evitar este control de tiempo con este motor. Si es imprescindible, activar 'ignorar bandera' para el (Coliseo ya lo contempla) y documentar que sus resultados no son homologables.</sub>
-
-### 3. El motor emite 'bestmove' sin que se le haya pedido
-
-| Campo | Valor |
-|---|---|
-| Prioridad | 🟠 ALTA |
-| Esfuerzo estimado | medio |
-| Donde mirar | bucle principal de entrada/salida (lectura de stdin) |
-| Veces observado | 1 |
-| Codigo del comportamiento | `bestmove_fantasma` |
-| Pruebas que lo detectaron | `F03_doble_go` |
-
-**Sintoma y por que importa**: Rompe la sincronia: la GUI tomara ese bestmove como respuesta a la siguiente jugada y a partir de ahi todo va desfasado.
-
-**Comportamiento correcto**: Un 'bestmove' por cada 'go'.
+**Comportamiento correcto**: Siempre 'bestmove <jugada>' al terminar la busqueda.
 
 **Lo que hizo este motor**:
 
 ```
-con dos 'go' seguidos sin esperar el bestmove llegan 2 lineas bestmove: ['bestmove b1c3', 'bestmove g1f3 ponder g8f6']
+con 'position' en mitad de una busqueda no llega ningun bestmove
+con 'setoption' en mitad de una busqueda no llega ningun bestmove
 ```
 
 **Secuencia que lo reproduce** (enviada al motor por su entrada estandar):
 
 ```
 position startpos
-go movetime 400
-go movetime 400
+go movetime 1500
+position startpos moves e2e4
 ```
 
-**Causa habitual**: Se emite mas de un 'bestmove' por cada 'go' (por ejemplo, uno al abortar y otro al terminar), o se atiende un 'go' nuevo sin haber cerrado el anterior.
+**Causa habitual**: La busqueda sale por un camino que no emite 'bestmove': excepcion capturada, lista de jugadas vacia, o un 'return' temprano al agotarse el tiempo.
 
-**Cambio sugerido**: Invariante: exactamente una linea 'bestmove' por cada 'go'. Serializar las peticiones e ignorar un 'go' que llegue con una busqueda en curso.
+**Cambio sugerido**: Garantizar por construccion que todo camino de salida de la busqueda emite exactamente una linea 'bestmove'. Lo mas robusto es emitirla en un unico punto (patron 'defer'/RAII o un bloque final), con una jugada legal de reserva elegida antes de empezar a buscar.
 
-<sub>Mientras no se arregle, la GUI tiene que: Emparejar peticiones y respuestas con un contador; descartar los bestmove inesperados y registrarlos.</sub>
+<sub>Mientras no se arregle, la GUI tiene que: Timeout duro por jugada = tiempo asignado + margen. Al vencer: 'stop', esperar un poco mas, y si sigue sin contestar, matar y relanzar, dando la partida por perdida.</sub>
 
 <details><summary>Extracto del log de comunicacion</summary>
 
 ```
-[18:24:27.678] [+    297.0ms] >> ucinewgame
-[18:24:27.678] [+    297.0ms] >> isready
-[18:24:27.678] [+    297.0ms] << readyok   <-- CRLF
-[18:24:27.678] [+    297.0ms] >> position startpos
-[18:24:27.678] [+    297.0ms] >> go movetime 400
-[18:24:27.678] [+    297.0ms] >> go movetime 400
-[18:24:27.690] [+    313.0ms] << bestmove b1c3   <-- CRLF
-[18:24:28.049] [+    672.0ms] << bestmove g1f3 ponder g8f6   <-- CRLF
+[21:59:49.437] [+    266.2ms] >> ucinewgame
+[21:59:49.437] [+    266.2ms] >> isready
+[21:59:49.437] [+    266.2ms] << readyok   <-- CRLF
+[21:59:49.437] [+    266.3ms] >> position startpos
+[21:59:49.437] [+    266.3ms] >> go movetime 1500
+[21:59:49.437] [+    266.3ms] >> position startpos moves e2e4
 ```
 
 </details>
 
-### 4. El motor pierde por tiempo
+### 2. El motor pierde por tiempo
 
 | Campo | Valor |
 |---|---|
 | Prioridad | 🟠 ALTA |
 | Esfuerzo estimado | medio |
 | Donde mirar | gestion del tiempo de busqueda |
-| Veces observado | 4 |
+| Veces observado | 7 |
 | Codigo del comportamiento | `bandera` |
 | Pruebas que lo detectaron | `G_autoplay` |
 
@@ -163,8 +106,11 @@ go movetime 400
 ```
 6 perdidas por tiempo en 6 partidas con 1s a caer bandera ponder=no
 6 perdidas por tiempo en 6 partidas con 1s a caer bandera ponder=si
-6 perdidas por tiempo en 6 partidas con 2s + 0.1s ponder=no
-5 perdidas por tiempo en 8 partidas con 2s + 0.1s ponder=si
+8 perdidas por tiempo en 8 partidas con 2s + 0.1s ponder=si
+6 perdidas por tiempo en 6 partidas con 10s + 0.1s ponder=si
+3 perdidas por tiempo en 3 partidas con 30s a caer bandera ponder=si
+2 perdidas por tiempo en 2 partidas con 10 jugadas / 20s ponder=si
+2 perdidas por tiempo en 2 partidas con 60s + 1s ponder=si
 ```
 
 **Causa habitual**: El reparto del tiempo no tiene en cuenta el reloj real que envia la GUI, o no reserva nada para las jugadas siguientes.
@@ -173,96 +119,126 @@ go movetime 400
 
 <sub>Mientras no se arregle, la GUI tiene que: Usar controles de tiempo con incremento, subir el tiempo base o activar 'ignorar bandera'. Comprobar antes si el problema es el ponder (ver la seccion de ponder del informe).</sub>
 
-### 5. Quedan procesos hijos vivos despues de cerrar el motor
+### 3. 'go' sin parametros se comporta como busqueda infinita
 
 | Campo | Valor |
 |---|---|
-| Prioridad | 🟠 ALTA |
-| Esfuerzo estimado | medio |
-| Donde mirar | terminacion del proceso |
-| Veces observado | 1 |
-| Codigo del comportamiento | `huerfanos` |
-| Pruebas que lo detectaron | `G_autoplay` |
-
-**Sintoma y por que importa**: El motor lanza subprocesos (envoltorios .bat, JVM, motores NNUE auxiliares) que sobreviven al padre.
-
-**Comportamiento correcto**: Al cerrar el motor no queda ningun descendiente vivo.
-
-**Lo que hizo este motor**:
-
-```
-procesos supervivientes: [(87968, 'ProcessGovernor.exe')]
-```
-
-**Causa habitual**: El motor lanza procesos hijos (envoltorios, ayudantes) que no mata al salir.
-
-**Cambio sugerido**: Terminar explicitamente los hijos antes de salir, o lanzarlos de forma que mueran con el padre (job object en Windows).
-
-<sub>Mientras no se arregle, la GUI tiene que: Fotografiar los descendientes ANTES de cerrar (Toolhelp32 / taskkill /T) y matarlos explicitamente despues. Con `cmd.exe /c motor.bat`, matar solo el cmd.exe deja el motor huerfano.</sub>
-
-### 6. No procesa el resto de la linea tras un token desconocido
-
-| Campo | Valor |
-|---|---|
-| Prioridad | 🔵 BAJA |
+| Prioridad | 🟡 MEDIA |
 | Esfuerzo estimado | trivial |
-| Donde mirar | bucle principal de entrada/salida (lectura de stdin) |
+| Donde mirar | gestion del tiempo de busqueda |
 | Veces observado | 1 |
-| Codigo del comportamiento | `no_procesa_tras_token_desconocido` |
-| Pruebas que lo detectaron | `A06_token_desconocido` |
+| Codigo del comportamiento | `go_sin_limite_infinito` |
+| Pruebas que lo detectaron | `C_go_pelado` |
 
-**Sintoma y por que importa**: La especificacion UCI pide ignorar los tokens iniciales que no se entiendan y procesar el resto ('joho debug on' debe activar el debug). Casi ninguna GUI depende de esto.
+**Sintoma y por que importa**: Es lo que dice la especificacion, pero muchas GUIs lo mandan por error.
 
-**Comportamiento correcto**: readyok (ignorando el token 'joho')
+**Comportamiento correcto**: Busqueda infinita hasta 'stop'.
 
 **Lo que hizo este motor**:
 
 ```
-tras 'joho isready' no llego readyok
+'go' sin parametros busca indefinidamente (comportamiento correcto segun la especificacion)
 ```
 
-**Causa habitual**: Se mira solo el primer token y si no se reconoce se descarta la linea entera.
+**Causa habitual**: Comportamiento correcto segun la especificacion.
 
-**Cambio sugerido**: La especificacion pide ir descartando tokens iniciales desconocidos hasta encontrar uno valido ('joho debug on' debe activar el debug). Basta con un bucle sobre los tokens antes de despachar.
+**Cambio sugerido**: Nada que arreglar.
 
-<sub>Mientras no se arregle, la GUI tiene que: Enviar siempre comandos limpios, sin prefijos ni extensiones propias.</sub>
+<sub>Mientras no se arregle, la GUI tiene que: No enviar nunca 'go' pelado: incluir siempre movetime, depth o reloj.</sub>
+
+### 4. La busqueda no termina por si sola en el plazo previsto
+
+| Campo | Valor |
+|---|---|
+| Prioridad | 🟡 MEDIA |
+| Esfuerzo estimado | medio |
+| Donde mirar | gestion del tiempo de busqueda |
+| Veces observado | 281 |
+| Codigo del comportamiento | `busqueda_no_termina_sola` |
+| Pruebas que lo detectaron | `B04_nodes`, `C_nodes_50k`, `G_autoplay` |
+
+**Sintoma y por que importa**: El motor no respeta el limite que se le dio (movetime, reloj o profundidad) y sigue buscando hasta que la GUI le manda 'stop'. Obedece el stop sin problema, asi que es un fallo de gestion del tiempo, no de comunicacion.
+
+**Comportamiento correcto**: Terminar solo dentro del limite indicado.
+
+**Lo que hizo este motor**:
+
+```
+la busqueda no termino por si sola en 20010 ms (go nodes 200000); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30014 ms (nodes_50k ply 1, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30000 ms (nodes_50k ply 2, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30004 ms (nodes_50k ply 3, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30013 ms (nodes_50k ply 4, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30007 ms (nodes_50k ply 5, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30002 ms (nodes_50k ply 6, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30016 ms (nodes_50k ply 7, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30006 ms (nodes_50k ply 8, reloj 0 ms); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 30015 ms (nodes_50k ply 9, reloj 0 ms); obedecio al 'stop' en 1 ms
+la busqueda no termino por si sola en 60013 ms (nodes_50k ponder=False partida 1 ply 1); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60006 ms (nodes_50k ponder=False partida 1 ply 2); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60004 ms (nodes_50k ponder=False partida 1 ply 3); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60016 ms (nodes_50k ponder=False partida 1 ply 4); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60010 ms (nodes_50k ponder=False partida 1 ply 5); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60016 ms (nodes_50k ponder=False partida 1 ply 6); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60010 ms (nodes_50k ponder=False partida 1 ply 7); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60005 ms (nodes_50k ponder=False partida 1 ply 8); obedecio al 'stop' en 0 ms
+la busqueda no termino por si sola en 60009 ms (nodes_50k ponder=False partida 1 ply 9); obedecio al 'stop' en 0 ms
+```
+
+**Causa habitual**: El limite se comprueba en un sitio al que no siempre se llega, o el modo 'infinite' se queda pegado.
+
+**Cambio sugerido**: Unificar la comprobacion del limite (tiempo, nodos o profundidad) en una unica funcion que se llame desde el bucle de nodos, y respetarla en todos los modos.
+
+<sub>Mientras no se arregle, la GUI tiene que: Mantener el timeout duro por jugada y el 'stop' de emergencia: es exactamente lo que evita que la partida se quede parada. Ajustar ademas el tiempo asignado para que el stop llegue antes de que caiga la bandera.</sub>
 
 <details><summary>Extracto del log de comunicacion</summary>
 
 ```
-[18:17:48.820] [+   2110.0ms] >> joho isready
+[21:44:06.339] [+   9314.7ms] >> go nodes 200000
+[21:44:26.348] [+  29324.3ms] ## TIMEOUT esperando bestmove: enviamos stop
+[21:44:26.348] [+  29324.4ms] >> stop
+[21:44:26.348] [+  29324.5ms] << bestmove e2e4 ponder b8c6   <-- CRLF
 ```
 
 </details>
 
-### 7. 'go' sin parametros termina por su cuenta
+### 5. El motor ignora 'go nodes N'
 
 | Campo | Valor |
 |---|---|
 | Prioridad | 🔵 BAJA |
-| Esfuerzo estimado | trivial |
+| Esfuerzo estimado | medio |
 | Donde mirar | gestion del tiempo de busqueda |
 | Veces observado | 1 |
-| Codigo del comportamiento | `go_pelado_termina_solo` |
-| Pruebas que lo detectaron | `C_go_pelado` |
+| Codigo del comportamiento | `no_soporta_nodes` |
+| Pruebas que lo detectaron | `B04_nodes` |
 
-**Sintoma y por que importa**: La especificacion dice que equivale a busqueda infinita. Este motor devuelve jugada solo, lo que en la practica es mas comodo.
-
-**Comportamiento correcto**: Buscar hasta recibir 'stop'.
+**Comportamiento correcto**: Terminar al alcanzar el numero de nodos.
 
 **Lo que hizo este motor**:
 
 ```
-'go' sin parametros devolvio bestmove solo, en 687 ms
+'go nodes 200000' no termino en 20 s
 ```
 
-**Causa habitual**: 'go' sin parametros deberia buscar indefinidamente hasta 'stop'.
+**Causa habitual**: El parametro 'nodes' no se lee.
 
-**Cambio sugerido**: Detalle menor de conformidad: tratar 'go' sin limites como 'go infinite'.
+**Cambio sugerido**: Contar nodos y abortar al superar el limite. Util para pruebas reproducibles.
 
-<sub>Mientras no se arregle, la GUI tiene que: Sin impacto: la GUI no deberia enviar 'go' pelado nunca.</sub>
+<sub>Mientras no se arregle, la GUI tiene que: No ofrecer control por nodos para este motor.</sub>
 
-### 8. El motor acepta un FEN sintacticamente invalido
+<details><summary>Extracto del log de comunicacion</summary>
+
+```
+[21:44:06.339] [+   9314.7ms] >> go nodes 200000
+[21:44:26.348] [+  29324.3ms] ## TIMEOUT esperando bestmove: enviamos stop
+[21:44:26.348] [+  29324.4ms] >> stop
+[21:44:26.348] [+  29324.5ms] << bestmove e2e4 ponder b8c6   <-- CRLF
+```
+
+</details>
+
+### 6. El motor acepta un FEN sintacticamente invalido
 
 | Campo | Valor |
 |---|---|
@@ -280,10 +256,10 @@ tras 'joho isready' no llego readyok
 **Lo que hizo este motor**:
 
 ```
-con el FEN invalido 'campos_de_menos' devuelve c2c4 en vez de quejarse
-con el FEN invalido 'fila_incompleta' devuelve h2h3 en vez de quejarse
+con el FEN invalido 'campos_de_menos' devuelve g1f3 en vez de quejarse
+con el FEN invalido 'fila_incompleta' devuelve g1f3 en vez de quejarse
 con el FEN invalido 'pieza_invalida' devuelve g1f3 en vez de quejarse
-con el FEN invalido 'sin_reyes' devuelve 0000 en vez de quejarse
+con el FEN invalido 'sin_reyes' devuelve g1f3 en vez de quejarse
 con el FEN invalido 'turno_invalido' devuelve g1f3 en vez de quejarse
 con el FEN invalido 'casilla_ep_absurda' devuelve g1f3 en vez de quejarse
 ```
@@ -309,24 +285,22 @@ python camifurlo.py --motor "<ruta>" --protocolo u --fases D    # solo ponder
 python camifurlo.py --motor "<ruta>" --protocolo u --fases CG   # tiempo y partidas
 ```
 
-_Generado por Camifurlo v1.0.0 el 2026-08-09._
+_Generado por Camifurlo v1.0.0 el 2026-08-12._
 
 ---
 
-## Estado resuelto en Hy3 1.7
+## Estado de resolución (revisión del autor — Hy3)
 
-Los 8 hallazgos de este informe fueron corregidos en el código fuente y verificados
-con `tests/verify_v17.py` (10/10). Resumen:
+Revisado el 2026-08-11 por Hy. Se leyó el código fuente, no solo el informe, y se
+recompiló `Hy3 1.7.exe` (versión **sin** incrementar). Estado de cada hallazgo:
 
-| # | Problema | Estado | Cambio |
+| # | Hallazgo | Estado | Notas |
 |---|---|---|---|
-| 1 | Ponder cuenta el tiempo como propio | ✅ Resuelto | El reloj arranca en `ponderhit` (`g_ponder_offset` en `search.cpp`). |
-| 2 | Sobrepaso grave del tiempo | ✅ Resuelto | Tope duro `max_time_ms` dentro de `time_up()`. |
-| 3 | `bestmove` fantasma (varios por `go`) | ✅ Resuelto | Se ignora `go` en curso; se suprime `bestmove` en abortos por `position`/`ucinewgame`/`setoption`/`quit`. |
-| 4 | Pérdidas por tiempo | ✅ Resuelto | Presupuesto desde `wtime`/`btime` con techo duro = reloj − 10 ms. |
-| 5 | Procesos hijos huérfanos | ✅ Resuelto (defensivo) | Job Object `KILL_ON_JOB_CLOSE` en Windows. |
-| 6 | No procesa tras token desconocido | ✅ Resuelto | El bucle principal descarta tokens iniciales desconocidos. |
-| 7 | `go` sin parámetros termina solo | ✅ Resuelto | `go` sin límites = búsqueda infinita hasta `stop`. |
-| 8 | Acepta FEN inválido | ✅ Resuelto | `validate_fen()` rechaza FEN malformados conservando la posición previa. |
+| 1 | No devuelve `bestmove` | **RESUELTO** | Causa real: la propia 1.7 introdujo `g_suppress_bestmove`, que suprimía el `bestmove` al abortar por `position`/`setoption`/`quit`. Mecanismo eliminado; `run_search()` emite siempre un `bestmove`. |
+| 2 | Pierde por tiempo | **RESUELTO** | Causa real: `g_ponder_offset` obsoleto de una partida con ponder previa hacía que `effective_elapsed` fuera negativo y `time_up()` nunca se disparara. Ahora se reinicia en cada `search()`. |
+| 3 | `go` sin parámetros = infinita | **NO APLICA** | Comportamiento correcto según la especificación UCI (el propio informe dice "Nada que arreglar"). |
+| 4 | La búsqueda no termina sola | **RESUELTO** | Mismo origen que #2 (offset de ponder). Además, las instancias `nodes_50k` se resolvieron con el límite de nodos (#5). |
+| 5 | Ignora `go nodes N` | **RESUELTO** | `lim.max_nodes` se parsea y `time_up()` lo respeta. `go nodes 200000` termina en ~0,3 s. |
+| 6 | Acepta un FEN inválido | **FALSO POSITIVO** | `validate_fen()` ya rechaza los 6 casos (campos, filas, rey, turno, ep) y avisa con `info string Invalid FEN ignored`. Verificado empíricamente contra el binario. Sin cambio. |
 
-El motor compilado para release es `Hy3 1.7.exe` (MSVC, `build_release.bat`).
+Verificación: `tests/verify_timefix.py` → TODO OK (bestmove siempre emitido, `go nodes` termina, FEN inválidos rechazados).

@@ -20,6 +20,7 @@ struct SearchLimits {
     int max_depth = 6;
     int64_t time_ms = 1000; // límite de tiempo (0 = sin límite)
     int64_t max_time_ms = 0; // techo duro opcional (0 = usar time_ms)
+    int64_t max_nodes = 0;  // límite de nodos (0 = sin límite)
     bool ponder = false;     // búsqueda en tiempo del rival (go ponder)
     InfoCallback on_info;   // opcional: se llama tras cada iteración
 };

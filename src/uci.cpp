@@ -22,10 +22,8 @@ using namespace hy3;
 static Board g_board;
 static std::thread g_search_thread;
 static std::atomic<bool> g_searching(false);
-// Cuando una búsqueda se aborta porque llega 'position'/'ucinewgame'/'setoption'
-// o 'quit' (no 'stop'), su 'bestmove' no debe emitirse: la posición ya no es
-// válida o el motor se cierra. (Fix PARA_EL_AUTOR #3)
-static std::atomic<bool> g_suppress_bestmove(false);
+// La búsqueda SIEMPRE emite un 'bestmove' al terminar, cualquiera que sea el
+// motivo de terminación, para que la GUI nunca se quede esperando. (Fix #1)
 static Move g_best_move = 0;
 static SearchResult g_last_result;
 static std::vector<uint64_t> g_history;   // claves Zobrist de las posiciones jugadas
@@ -72,21 +70,19 @@ static Move uci_to_move(const Board& b, const std::string& s) {
 static void run_search(SearchLimits lim, Board board) {
     g_last_result = search(board, lim);
     g_best_move = g_last_result.best;
-    // No emitir 'bestmove' si la búsqueda fue abortada por un comando que
-    // invalida la posición (position/ucinewgame/setoption/quit). (Fix #3)
-    if (!g_suppress_bestmove.load()) {
-        if (g_best_move != 0) {
-            std::cout << "bestmove " << move_to_uci(g_best_move);
-            // Sugerencia de ponder: segundo movimiento de la PV. Permite al GUI
-            // arrancar 'go ponder' en la respuesta esperada del rival.
-            if (g_last_result.ponder != 0)
-                std::cout << " ponder " << move_to_uci(g_last_result.ponder);
-            std::cout << std::endl;
-        } else {
-            std::cout << "bestmove 0000" << std::endl;
-        }
+    // SIEMPRE emitir exactamente una línea 'bestmove' al terminar la búsqueda,
+    // sea cual sea el motivo (límite de tiempo, 'stop' o aborto por
+    // 'position'/'setoption'/'quit'). Garantizarlo evita que la GUI se quede
+    // esperando indefinidamente y pierda la partida por tiempo. (Fix #1)
+    if (g_best_move != 0) {
+        std::cout << "bestmove " << move_to_uci(g_best_move);
+        // Sugerencia de ponder: segundo movimiento de la PV.
+        if (g_last_result.ponder != 0)
+            std::cout << " ponder " << move_to_uci(g_last_result.ponder);
+        std::cout << std::endl;
+    } else {
+        std::cout << "bestmove 0000" << std::endl;
     }
-    g_suppress_bestmove.store(false);
     g_searching = false;
 }
 
@@ -134,10 +130,10 @@ int main() {
                 // CRÍTICO: redimensionar la TT mientras el hilo de búsqueda la
                 // está leyendo liberaba la memoria bajo sus pies (use-after-free).
                 // v1.6 detiene y espera a la búsqueda antes de tocar la tabla.
-                if (g_search_thread.joinable()) { g_suppress_bestmove.store(true); signal_stop(); g_search_thread.join(); g_searching = false; }
+                if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); g_searching = false; }
                 try { int mb = std::stoi(value); tt_resize(mb); } catch (...) {}
             } else if (name == "Clear Hash") {
-                if (g_search_thread.joinable()) { g_suppress_bestmove.store(true); signal_stop(); g_search_thread.join(); g_searching = false; }
+                if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); g_searching = false; }
                 tt_clear();
             }
             break;
@@ -145,7 +141,7 @@ int main() {
             std::cout << "readyok\n";
             break;
         } else if (cmd == "position") {
-            if (g_search_thread.joinable()) { g_suppress_bestmove.store(true); signal_stop(); g_search_thread.join(); }
+            if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); }
             g_searching = false;
             g_history.clear();
             std::string what; iss >> what;
@@ -195,7 +191,7 @@ int main() {
                 else if (token == "infinite") { is_infinite = true; }
                 else if (token == "ponder")   { is_ponder = true; }
                 else if (token == "mate")     { if (iss >> token) { lim.max_depth = std::stoi(token) * 2; has_depth = true; } }
-                else if (token == "nodes")    { if (iss >> token) { /* aceptado, no limitante */ } }
+                else if (token == "nodes")    { if (iss >> token) { try { lim.max_nodes = std::stoll(token); } catch (...) {} } }
                 else if (token == "searchmoves") { /* no soportado: se ignora */ }
             }
             if (is_infinite) {
@@ -262,7 +258,6 @@ int main() {
             if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); }
             clear_stop();
             set_game_history(g_history);   // historial real para triple repetición
-            g_suppress_bestmove.store(false);
             g_searching = true;
             g_search_thread = std::thread(run_search, lim, g_board);
             break;
@@ -290,11 +285,11 @@ int main() {
             }
             break;
         } else if (cmd == "quit" || cmd == "exit") {
-            if (g_search_thread.joinable()) { g_suppress_bestmove.store(true); signal_stop(); g_search_thread.join(); }
+            if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); }
             quit = true;
             break;
         } else if (cmd == "ucinewgame") {
-            if (g_search_thread.joinable()) { g_suppress_bestmove.store(true); signal_stop(); g_search_thread.join(); }
+            if (g_search_thread.joinable()) { signal_stop(); g_search_thread.join(); }
             g_searching = false;
             clear_stop();
             tt_clear();          // no arrastrar datos de la partida anterior

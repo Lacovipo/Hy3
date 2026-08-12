@@ -209,6 +209,7 @@ struct Context {
     // Jugada que condujo a cada ply (para countermove y anti-ping-pong).
     Move move_at_ply[128];
     bool has_time_limit = true;
+    int64_t max_nodes = 0;      // límite de nodos (0 = sin límite)
     // Tabla triangular de la Variante Principal (PV)
     Move pv_table[128][128];
     int pv_len[128];
@@ -266,6 +267,8 @@ static int64_t effective_elapsed(Context& ctx) {
 static bool time_up(Context& ctx) {
     if (ctx.stop) return true;
     if (g_stop_flag.load(std::memory_order_relaxed)) { ctx.stop = true; return true; }
+    // Límite de nodos (parada por 'go nodes N').
+    if (ctx.max_nodes > 0 && ctx.nodes >= ctx.max_nodes) { ctx.stop = true; return true; }
     // En ponder el reloj propio no corre: seguimos pensando hasta stop/ponderhit.
     if (g_pondering.load(std::memory_order_relaxed)) return false;
     if (!ctx.has_time_limit) return false;
@@ -819,7 +822,15 @@ SearchResult search(Board& b, const SearchLimits& lim) {
     ctx.time_ms = lim.time_ms;
     ctx.max_time_ms = lim.max_time_ms > 0 ? lim.max_time_ms : lim.time_ms;
     ctx.has_time_limit = (lim.time_ms > 0);
+    ctx.max_nodes = lim.max_nodes;
     ctx.root_halfmove = b.halfmove;
+    // Reset del estado de ponder: el offset de ponder "gratis" sólo es válido
+    // durante una búsqueda de ponder. Si venimos de una búsqueda previa (p.ej.
+    // tras un juego con ponder) un offset obsoleto haría que time_up() viera un
+    // tiempo transcurrido negativo y la búsqueda IGNORARA el límite de tiempo
+    // -> pérdida por tiempo. (Fix PARA_EL_AUTOR #2 / #4)
+    g_ponder_offset.store(0, std::memory_order_relaxed);
+    if (!lim.ponder) g_pondering.store(false, std::memory_order_relaxed);
     if (lim.ponder) set_pondering(true);
     SearchResult res;
     res.best = 0; res.score = 0; res.depth = 0; res.nodes = 0;

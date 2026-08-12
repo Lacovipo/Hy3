@@ -322,11 +322,13 @@ Compilación de release con **vinculación dinámica** (en adelante el binario d
 
 La versión 1.7 es la respuesta al informe de solidez funcional `docs/PARA_EL_AUTOR_DEL_MOTOR.md` (generado por el analizador Camifurlo v1.0.0 sobre Hy3 1.6). El análisis sometió al motor a una batería de pruebas de protocolo, tiempo, ponder, ciclo de vida y partidas reales, y detectó **8 desviaciones** de la especificación UCI: 4 de prioridad ALTA y 4 de prioridad BAJA. Todas se han corregido en el código fuente. Cada entrada indica el síntoma observado, la causa y el cambio aplicado.
 
+Tras compilar la 1.7, se **volvió a pasar Camifurlo sobre `Hy3 1.7.exe`** y el nuevo informe (`docs/PARA_EL_AUTOR_DEL_MOTOR.md`) detectó **6 hallazgos residuales** (1 🔴 crítica, 1 🟠 alta, 2 🟡 medias, 2 🔵 bajas). Se revisó el motor con el código abierto —no solo el informe— y se corrigieron en la subsección **§7.3**. **La versión se mantiene en 1.7** (sin incrementar el número); se recompiló `Hy3 1.7.exe`.
+
 | # | Problema | Área | Cambio aplicado |
 |---|---|---|---|
 | 1 | El ponder cuenta el tiempo como propio → llega tarde tras `ponderhit` (y causa pérdidas por tiempo solo con ponder) | `search.cpp` | El reloj propio **arranca en el `ponderhit`**: el tiempo de ponder se acumula en `g_ponder_offset` y se resta del tiempo transcurrido, de modo que el tiempo pensado gratis (del rival) no se descuenta del reloj propio. |
 | 2 | Sobrepaso grave del tiempo asignado (hasta 1,88× el `movetime`) | `search.cpp` | **Tope DURO** dentro de `time_up()`: aborta la iteración en curso al superar `max_time_ms` y devuelve la mejor jugada hallada hasta ese momento. Antes solo se comprobaba el tiempo *entre* iteraciones. |
-| 3 | `bestmove` fantasma: dos `bestmove` por un solo `go` | `uci.cpp` | Se **ignora un `go` que llegue con una búsqueda en curso** (invariante: exactamente un `bestmove` por `go`). Además se **suprime** el `bestmove` cuando la búsqueda se aborta por `position` / `ucinewgame` / `setoption` / `quit`. |
+| 3 | `bestmove` fantasma: dos `bestmove` por un solo `go` | `uci.cpp` | Se **ignora un `go` que llegue con una búsqueda en curso** (invariante: exactamente un `bestmove` por `go`). El `bestmove` se emite **siempre** al terminar el hilo de búsqueda —incluso si se aborta por `position` / `ucinewgame` / `setoption` / `quit`—, para no dejar colgada a la GUI. *Nota:* la supresión de `bestmove` que esta misma versión introdujo fue la causa de la reincidencia 🔴 #1 de la re-lectura (ver §7.3). |
 | 4 | Pérdidas por tiempo (agota el reloj antes de devolver la jugada) | `uci.cpp` / `search.cpp` | Presupuesto recalculado en cada jugada a partir de `wtime` / `btime` del `go`, con tope blando ≤ 1/3 del tiempo restante y **techo duro = reloj − 10 ms**, de modo que el motor siempre devuelve la jugada antes de caer la bandera. |
 | 5 | Quedan procesos hijos vivos tras cerrar el motor | `uci.cpp` | En Windows se crea un **Job Object** con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` y se asigna el proceso, para que cualquier hijo muera con el padre. (Medida defensiva: el motor no lanza subprocesos, pero cumple la recomendación del informe.) |
 | 6 | No procesa el resto de la línea tras un token desconocido | `uci.cpp` | El bucle principal **descarta tokens iniciales desconocidos** hasta encontrar un comando válido (`joho isready` → `readyok`). |
@@ -354,4 +356,37 @@ Batería funcional `tests/verify_v17.py` (10/10) que reproduce los escenarios de
 - `go` (sin parámetros) no emite `bestmove` hasta `stop` (Fix #7).
 - `go ponder …` + `ponderhit` → `bestmove` correcto (Fix #1).
 - `quit` → el proceso termina con código 0 sin dejar procesos hijos (Fix #5).
+
+### 7.3. Correcciones adicionales (re-lectura de Camifurlo sobre Hy3 1.7)
+
+Tras compilar la 1.7, se volvió a pasar el analizador Camifurlo
+(`docs/PARA_EL_AUTOR_DEL_MOTOR.md`, sobre `Hy3 1.7.exe`). La nueva pasada
+detectó **6 hallazgos residuales**: 1 🔴 crítica, 1 🟠 alta, 2 🟡 medias y
+2 🔵 bajas. Se revisó el motor **con el código abierto, no solo el informe**
+(esto era clave: el informe sugería causas "típicas", y en dos casos la causa
+real era distinta o el informe era un falso positivo). **La versión se mantiene
+en 1.7**; se recompiló `Hy3 1.7.exe`.
+
+| # | Hallazgo (informe) | Área | Causa real (vista en el código) | Cambio aplicado |
+|---|---|---|---|---|
+| 1 | No devuelve `bestmove` (🟥) | `uci.cpp` | La propia versión 1.7 había introducido `g_suppress_bestmove`: al abortar la búsqueda por `position` / `setoption` / `quit` **se suprimía** el `bestmove`, dejando a la GUI esperando indefinidamente (partida parada = pérdida). Era una regresión de la propia 1.7. | Eliminado `g_suppress_bestmove`. `run_search()` emite **siempre** exactamente una línea `bestmove` (con `bestmove 0000` solo si no hay jugada legal). La GUI nunca se queda colgada. |
+| 2 + 4 | Pérdidas por tiempo / la búsqueda no termina sola (🟠) | `search.cpp` | `g_ponder_offset` (tiempo de ponder "gratis" que se descuenta del reloj propio) **solo se reiniciaba dentro de `set_pondering(true)`**, que solo se llama en búsquedas de ponder. Tras una partida con ponder, un `go wtime X` normal heredaba un offset obsoleto grande → `effective_elapsed = now − start − offset` quedaba **negativo** → `time_up()` nunca se disparaba → la búsqueda ignoraba el límite y corría hasta que la GUI enviaba `stop` (ya fuera de bandera). | `search()` reinicia `g_ponder_offset = 0` y `g_pondering = false` **al inicio de cada búsqueda** (no solo en ponder). Ahora `effective_elapsed` es correcto y los topes blando/duro de `time_up()` se respetan. |
+| 5 | Ignora `go nodes N` (🔵) | `uci.cpp` / `search.cpp` | `go nodes N` se parseaba pero no se usaba; la búsqueda corría como infinita hasta `stop`. | `lim.max_nodes` se rellena desde `go nodes N`, se guarda en `Context::max_nodes` y `time_up()` lo comprueba **antes** de los límites de tiempo (`ctx.nodes >= ctx.max_nodes`). `go nodes N` ahora termina solo (resuelve también las instancias `nodes_50k` de #4). |
+| 6 | Acepta un FEN inválido (🔵) | `board.cpp` | **Falso positivo.** `validate_fen()` ya valida los 6 campos, las 8 filas que suman 8, un rey por bando, el turno y la coherencia de la casilla al paso. Verificado empíricamente contra el binario: los 6 FEN inválidos del informe se rechazan con `info string Invalid FEN ignored: <razón>` y se conserva la posición previa. | Sin cambio (ya era correcto). |
+| 3 | `go` sin parámetros = búsqueda infinita (🟡) | — | Comportamiento **correcto** según la especificación UCI (búsqueda infinita hasta `stop`). El propio informe indica "Nada que arreglar". | Sin cambio (ya correcto; ver §7 #7). |
+
+#### 7.3.1. Verificación empírica
+
+Se añadió `tests/verify_timefix.py` (driver UCI en Python) que reproduce los tres
+escenarios corregidos contra el binario compilado. Resultado: **TODO OK**.
+
+- `position startpos` → `go movetime 1500` → `position startpos moves e2e4`
+  (en mitad de búsqueda) → se recibe **exactamente un `bestmove`** (Fix #1).
+- `go nodes 200000` → `bestmove` en **0,3 s** (antes no terminaba en 20 s; Fix #5).
+- Seis FEN inválidos → `info string Invalid FEN ignored: …` y se conserva la
+  posición previa (Fix #6, falso positivo).
+
+Compilación de release (MSVC): `build_release.bat` → `Hy3 1.7.exe` (sin cambio de
+versión). El índice de la TT usa `_umul128` en MSVC.
+
 

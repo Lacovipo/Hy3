@@ -14,7 +14,8 @@ Esto no es una revisión sino un listado de recursos disponibles:
 
 * También puedes consultar en la web todo lo que necesites.
 
-* Si aún no has implementado pondering, debes hacerlo cuanto antes. Recuerda enviar la jugada a ponderar cuando envíes tu movimiento, y recuerda también que cuando recibas ponderhit puedes descontar el tiempo que has pensado del presupuesto, de modo que si has pensado ya más del presupuesto, puedes mover inmediatamente.
-
 * Te recomiendo que, si no tienes algo parecido, programes una opción para imprimir el árbol de búsqueda, con un print a la entrada de cada nodo (con información interesante como alpha, beta, profundidad, etc.) y otro a la salida.
  Puedes identificar los nodos con el contador general de nodos buscados. Eso te ayudará mucho a depurar problemas en la búsqueda.
+
+* Diagnóstico a primera vista:
+	- falta velocidad (nps)
