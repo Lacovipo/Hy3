@@ -229,6 +229,15 @@ static std::atomic<int64_t> g_ponder_start{0};
 // reloj propio arranque de verdad en el 'ponderhit'. (Fix PARA_EL_AUTOR #1 / #4)
 static std::atomic<int64_t> g_ponder_offset{0};
 
+// Verdadero solo MIENTRAS el hilo de búsqueda está ejecutando. Evita una
+// condición de carrera: si 'quit'/'stop'/'setoption'/'position' llegan justo
+// después de 'go' (p.ej. en tests por lotes o con la entrada ya bufferizada),
+// el hilo principal puede llamar a signal_stop() ANTES de que run_search haya
+// empezado, poniendo g_stop_flag=1 y haciendo que la búsqueda se aborte en su
+// primer nodo (devolviendo el primer movimiento legal sin pensar). Con este
+// flag, signal_stop() solo actúa cuando la búsqueda ya está corriendo de verdad.
+static std::atomic<bool> g_search_running{false};
+
 static void end_ponder() {
     if (g_pondering.load(std::memory_order_relaxed)) {
         g_ponder_offset.fetch_add(now_ms() - g_ponder_start.load(std::memory_order_relaxed),
@@ -531,27 +540,28 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
     // cuando no estamos en jaque, ya que en jaque no es fiable.
     Score static_eval = in_check ? 0 : evaluate(b);
 
-    // ---- Reverse Futility Pruning / Static Null-Move Pruning ----
-    // En profundidades bajas, si la evaluación estática supera beta por un
-    // margen amplio y no estamos en jaque ni cerca de un mate, podamos.
-    if (!is_pv && !in_check && depth <= 3 &&
-        beta > -MATE + 1000 && beta < MATE - 1000) {
-        int margin = 120 * depth;
-        // Guarda anti-ahogado: si el bando en turno no tiene jugadas legales,
-        // la posición es tablas por ahogado (0), no la evaluación material.
-        // v1.5 podaba estas posiciones devolviendo una ventaja inexistente.
-        if (static_eval - margin >= beta) {
-            if (b.legal_move_count() > 0) return static_eval - margin;
-            return 0;
-        }
-    }
-
     MoveList moves; b.legal_moves(moves);
     if (moves.empty()) {
         if (in_check) return -MATE + ply;
         return 0;
     }
     order_moves(b, moves, ttm, ctx, ply);
+
+    // ---- Reverse Futility Pruning / Static Null-Move Pruning ----
+    // En profundidades bajas, si la evaluación estática supera beta por un
+    // margen amplio y no estamos en jaque ni cerca de un mate, podamos.
+    if (!is_pv && !in_check && depth <= 3 &&
+        beta > -MATE + 1000 && beta < MATE - 1000) {
+        int margin = 120 * depth;
+        // Guarda anti-ahogado: la lista legal ya está generada, así que la
+        // comprobación de ahogado es O(1). v1.5 llamaba a legal_move_count()
+        // (make/unmake por cada movimiento) y encima podaba las posiciones sin
+        // salida devolviendo una ventaja inexistente.
+        if (static_eval - margin >= beta) {
+            if (!moves.empty()) return static_eval - margin;
+            return 0;
+        }
+    }
 
     Score alpha_orig = alpha;
     Score best = -INF;
@@ -582,17 +592,23 @@ static Score negamax(Board& b, int depth, Score alpha, Score beta, int ply, Cont
             ctx.rep.push_back(h);
             Square saved_ep = b.ep_square;
             uint64_t saved_key = b.zkey;
+            Move saved_move_at_ply = ctx.move_at_ply[ply];
             // Actualización INCREMENTAL de la clave: v1.5 llamaba a b.hash(),
             // que recorre las 64 casillas en cada nodo con null-move.
             b.zkey ^= zobrist_side();
             if (saved_ep != NO_SQ) b.zkey ^= zobrist_ep(saved_ep);
             b.ep_square = NO_SQ;
             b.side = Color(b.side ^ 1);  // null move (cambio de lado)
-            ctx.move_at_ply[ply] = 0;    // el null-move no es una jugada real
+            // El null-move NO es una jugada real: conservamos la jugada del ply
+            // padre para que los nodos hijos (countermove, anti-ping-pong,
+            // historial) sigan viendo la jugada que REALMENTE nos trajo aquí.
+            // Antes se pisaba con 0 y se perdía esa información en toda la
+            // subrama del null-move.
             Score null_sc = -negamax(b, depth - 1 - R, -beta, -beta + 1, ply + 1, ctx);
             b.side = Color(b.side ^ 1);  // restaurar lado
             b.ep_square = saved_ep;
             b.zkey = saved_key;
+            ctx.move_at_ply[ply] = saved_move_at_ply;   // restaurar la jugada del padre
             ctx.rep.pop_back();
             if (ctx.stop) return (best == -INF) ? 0 : best;
             if (null_sc >= beta) {
@@ -619,7 +635,7 @@ nmp_failed:;
     for (int mi = 0; mi < moves.count; mi++) {
         Move m = moves[mi];
         bool is_capture = (move_flag(m) == FLAG_CAPTURE || move_flag(m) == FLAG_EP);
-        bool is_quiet = !is_capture && move_promo(m) == 0;
+        bool is_quiet = !is_capture && move_promo(m) == 0;   // las promociones NO son "silenciosas" a efectos de poda
 
         // ---- Late Move Pruning (LMP) ----
         // En profundidades bajas, tras probar suficientes jugadas ordenadas y
@@ -810,6 +826,7 @@ static Score root_search(Board& b, int depth, Score alpha, Score beta, Context& 
 }
 
 SearchResult search(Board& b, const SearchLimits& lim) {
+    g_search_running.store(true, std::memory_order_relaxed);
     tt_init();
     init_lmr_table();
     tt_new_search();                 // envejece la TT: nueva jugada real
@@ -912,11 +929,23 @@ SearchResult search(Board& b, const SearchLimits& lim) {
             res.nodes = ctx.nodes;
         }
     }
+    g_search_running.store(false, std::memory_order_relaxed);
     return res;
 }
 
-void signal_stop() { g_stop_flag.store(true, std::memory_order_relaxed); }
+// Definido en uci.cpp: verdadero solo mientras el hilo de búsqueda corre de
+// verdad (evita abortar la búsqueda en su arranque por un 'quit'/'stop' que
+// llegue en la ventana de lanzamiento del hilo).
+extern std::atomic<bool> g_search_running;
+void signal_stop() {
+    // Solo señala parada si la búsqueda ya está corriendo de verdad (ver
+    // g_search_running). Evita abortar la búsqueda en su arranque por un
+    // 'quit'/'stop' que llegue en la ventana de lanzamiento del hilo.
+    if (g_search_running.load(std::memory_order_relaxed))
+        g_stop_flag.store(true, std::memory_order_relaxed);
+}
 void clear_stop() { g_stop_flag.store(false, std::memory_order_relaxed); }
+bool search_is_running() { return g_search_running.load(std::memory_order_relaxed); }
 
 std::string self_play(Board b, int max_depth, int time_ms, std::vector<std::string>* moves) {
     std::vector<std::string> mlist;

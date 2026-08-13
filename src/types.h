@@ -8,8 +8,8 @@ namespace hy3 {
 
 // Identidad del motor
 constexpr const char* ENGINE_NAME = "Hy3";
-constexpr const char* ENGINE_VERSION = "1.7";
-constexpr const char* ENGINE_ID = "Hy3 1.7";
+constexpr const char* ENGINE_VERSION = "1.8";
+constexpr const char* ENGINE_ID = "Hy3 1.8";
 
 // Casillas 0..63 (a1=0, b1=1, ..., h8=63)
 using Square = int;

@@ -52,6 +52,7 @@ SearchResult search(Board& b, const SearchLimits& lim);
 // Señal de parada externa (para el comando "stop" de UCI).
 void signal_stop();
 void clear_stop();
+bool search_is_running();
 
 // Ponder: mientras está activo, la búsqueda ignora el límite de tiempo.
 // ponderhit() lo desactiva y arranca el reloj real de la jugada.

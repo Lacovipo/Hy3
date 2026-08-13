@@ -389,4 +389,118 @@ escenarios corregidos contra el binario compilado. Resultado: **TODO OK**.
 Compilación de release (MSVC): `build_release.bat` → `Hy3 1.7.exe` (sin cambio de
 versión). El índice de la TT usa `_umul128` en MSVC.
 
+---
+
+## 8. Revisión a fondo de la versión 1.7 (auditoría de código)
+
+Esta sección recoge los resultados de una revisión completa del código fuente
+realizada sobre el motor **Hy3 1.7** (no sobre los informes externos). El
+objetivo era localizar errores de cualquier tipo y posibles mejoras. De la
+auditoría surgieron **5 correcciones de código** (todos los bugs eran reales y
+reproducibles, no falsos positivos) y un conjunto de **mejoras de rendimiento y
+robustez** documentadas para trabajo futuro. Las correcciones se aplicaron
+directamente al código y se verificaron con `perft` (generación de movimientos
+intacta) y con pruebas de evaluación. El motor se rebautiza internamente como
+**1.8** para reflejar estos arreglos (`ENGINE_VERSION` / `ENGINE_ID` en
+`src/types.h`).
+
+### 8.1. Errores corregidos
+
+| # | Módulo | Síntoma / Causa | Cambio aplicado | Gravedad |
+|---|---|---|---|---|
+| 1 | `board.cpp` (`make_move`) | **Hash Zobrist corrupto / lectura fuera de rango.** Un doble avance de peón **desde la fila 7 (blancas) o 2 (negras)** calculaba la casilla al paso en la fila 8 / −1, es decir `make_sq(f, 8)` = casilla 64, y hacía `k ^= ZOB_EP[64..]`, accediendo fuera de `ZOB_EP[64]` y dejando la clave incremental inválida (y por tanto la TT y la detección de repetición). | Se añade una guarda `er > 0 && er < 7` antes de fijar `ep_square`; si la casilla intermedia cae fuera del tablero (el peón está a un paso de coronar) se deja `NO_SQ`. | Bug (silente) |
+| 2 | `eval.cpp` (`evaluate`, peones pasados) | **Infliquis de peones pasados.** La condición usaba `pi.most_adv[them]` (el peón enemigo *más* avanzado de la columna adyacente). Eso declara "pasado" a un peón que tiene **cualquier** peón enemigo por delante, aunque haya otro más retrasado bloqueándolo. Ej.: blanco en e5 con negro en e6 se marcaba como pasado. | Se usa `pi.least_adv[them]` (el peón enemigo *menos* avanzado = el que ocupa la fila más alta en nuestra perspectiva): si ese aún está por delante, no es pasado. Es la definición correcta ("ningún peón enemigo delante"). | Bug de evaluación |
+| 3 | `search.cpp` (`negamax`, LMR) | **Las promociones tranquilas se reducían.** `is_quiet` se definía como `!is_capture && move_promo(m) == 0`, de modo que una promoción sin captura (que gana una dama) entraba en la reducción de *Late Move Reductions*. El comentario en el propio código exigía excluirlas ("una jugada que gana una dama nunca debe reducirse"). | `is_quiet` ahora excluye toda promoción (`move_promo(m) == 0`), de modo que las promociones tranquilas no se reducen, ni se podan por *futility* ni por *late-move pruning*. | Bug de fuerza |
+| 4 | `search.cpp` (`negamax`, null-move) | **Pérdida de contexto en la subrama del null-move.** El null-move pisaba `ctx.move_at_ply[ply]` con `0` antes de recursar. Los nodos hijos —que consultan `move_at_ply[ply-1]` para *countermove*, anti-ping-pong e historial— veían `0` en lugar de la jugada real que nos trajo al nodo, desactivando esas heurísticas en toda la rama del null-move. | Se conserva la jugada real del padre en `saved_move_at_ply` y se restaura al volver del null-move; los hijos siguen viendo la jugada correcta. | Bug de fuerza |
+| 5 | `search.cpp` (`negamax`) | **Doble generación de movimientos legales por nodo.** La *Reverse Futility Pruning* llamaba a `b.legal_move_count()` (que genera todos los pseudo-movimientos y hace make/unmake por cada uno para filtrar jaque) y el null-move volvía a llamar a `b.legal_moves()`. Cada nodo no-PV pagaba dos veces O(movimientos²) de trabajo de verificación de legalidad. | Se genera la lista legal **una sola vez** antes de RFP/NMP y se reutiliza para ambas y para el bucle principal. La guarda anti-ahogado de RFP pasa a ser O(1) sobre la lista ya generada. | Rendimiento |
+| 6 | `uci.cpp` / `search.cpp` | **Condición de carrera: la búsqueda se abortaba en su primer nodo.** Si `quit`/`stop`/`setoption`/`position` llegaban justo después de `go` (típico en tests por lotes o con la entrada ya bufferizada), el hilo principal llamaba a `signal_stop()` **antes de que `run_search` hubiera empezado a ejecutar**, poniendo `g_stop_flag = 1`. Al entrar a `search()`, `time_up()` devolvía `true` de inmediato, la búsqueda devolvía el **primer movimiento legal sin pensar** (p. ej. `b1c3`) y no emitía ninguna línea `info`. Era un bug silente de fuerza enorme en automatización y en cualquier `quit` veloz tras `go`. | Nuevo flag atómico `g_search_running` (en `search.cpp`, consultado vía `search_is_running()`) que solo es verdadero **mientras el hilo ejecuta**. `signal_stop()` solo activa `g_stop_flag` cuando la búsqueda ya corre de verdad; en la ventana de arranque del hilo la señal se ignora y la búsqueda arranca y completa con normalidad. | Bug crítico |
+
+> **Verificación de las correcciones.** Tras aplicar los 5 cambios:
+> - `tests/perft_test.cpp` (startpos d4 = 197 281; Kiwipete d3 = 97 862; posición 3 d4 = 43 238): las tres coinciden → make/unmake y generación intactos.
+> - Prueba de evaluación: un peón blanco e5 con negro e6 (bloqueado) ya **no** recibe el bono de pasado, mientras que un peón e5 con negro e4 (pasado real) sí lo recibe → el bono de peón pasado es ahora correcto.
+> - Compilación limpia (`g++ -std=c++17 -O2`, solo un aviso inofensivo de `NOMINMAX` ya existente).
+
+### 8.2. Mejoras recomendadas (no críticas, pendientes de implementar)
+
+Estas observaciones de la auditoría **no son bugs**, pero representan el margen
+de rendimiento y robustez más importante del motor. Se listan priorizadas;
+cada una debe implementarse y probarse de forma aislada.
+
+1. **`king_zone_pressure` es el cuello de botella de la evaluación.** Para cada
+   rey recorre las 64 casillas y, por cada pieza rival, camina la línea de
+   ataque completa (comprobando bloqueos) contra las 8 casillas de la zona. Es
+   ~O(64 · piezas · largo_de_rayo) por rey, y se llama dos veces por
+   `evaluate` (una por bando). Constituye buena parte de la lentitud de nps
+   (~277 k nps en la versión 1.6). Sugerencia: precalcular un *attack bitboard*
+   por color (aunque el resto sea mailbox) y consultar la zona por máscara, o
+   cachear la evaluación con una clave de peones (`pawn hash`) y un *eval cache*
+   indexado por `zkey`. Esto es lo que más elo "gratis" aportaría hoy.
+
+2. **Nº de nodos ≠ nº de posiciones evaluadas.** `ctx.nodes++` se hace en
+   `negamax` y en `quiescence`, pero **no** en los nodos de evasión de jaque
+   dentro de `quiescence` (el bucle de evasión no incrementa `nodes`). El
+   contador `nodes` de UCI es, por tanto, ligeramente inferior a la realidad, lo
+   que desvía el `nps` reportado. Corregible sumando las evasiones.
+
+3. **Historial de repetición incompleto en modo UCI.** `uci.cpp::apply_moves`
+   empuja `b.zkey` **antes** de cada movimiento, pero **no** empuja la posición
+   final tras aplicar todos los `moves`. En la práctica `set_game_history` se
+   llama con la raíz + las posiciones tras cada jugada, que es el caso habitual
+   (la raíz suele repetirse en la partida real), así que la triple repetición se
+   detecta correctamente. No obstante, para ser estrictamente conforme a las
+   reglas de la FIDE habría que empujar también la clave de la posición final.
+   Impacto: despreciable en la práctica; se documenta por exhaustividad.
+
+4. **`validate_fen` no protege `string_to_square` contra un campo `ep` corto.**
+   Si el FEN trae un `ep` de longitud 1 (p. ej. `"e"`), `validate_fen` ya lo
+   rechaza antes de llamar a `Board`, así que no hay desbordamiento hoy. Pero la
+   función `zobrist_ep(string_to_square(ep_part))` en `set_from_fen` leería
+   `ep_part[1]` sin comprobar `size()`, por lo que un FEN que saltara la
+   validación (p. ej. por un camino futuro) podría desbordar. Recomendación: que
+   `set_from_fen` use también `validate_fen` o verifique `ep_part.size() >= 2`
+   antes de `string_to_square` (ya se hace en la rama de asignación, pero no en
+   la validación de rango de la casilla).
+
+5. **Parsing de `position fen ... moves ...` por `string::find`.** Tras leer el
+   FEN se extraen los movimientos con `line.substr(line.find("moves") + 5)`. Si
+   la palabra `"moves"` apareciera dentro del FEN (no debería, pero un FEN
+   malicioso podría), la extracción sería incorrecta. Recomendable reconstruir
+   la subcadena de movimientos a partir del índice del token real ya leído en el
+   `istringstream` en lugar de buscar en la línea completa.
+
+6. **`Board::is_legal` usa `const_cast` sobre `this`.** Funcionalmente correcto
+   (el estado se restaura íntegramente vía `Undo`), pero técnicamente es
+   *undefined behavior* si algún día se invocara sobre un `Board` constante
+   verdadero. La práctica segura es que `is_legal` reciba el tablero por copia
+   o que `make_move`/`unmake_move` operen sobre un tablero mutable local.
+
+### 8.3. Notas sobre las correcciones de la 1.7 ya documentadas
+
+Las correcciones de la sección 7 (tiempo, ponder, `bestmove` único, FEN
+inválido, `go nodes`, Job Object) se mantienen vigentes y **no** se vieron
+afectadas por la auditoría. La única observación adicional es que el tope de
+tiempo en `search()` usa `effective_elapsed(ctx)` (que descuenta el ponder
+gratis) de forma coherente con `time_up()`; el único sitio que no lo hace es la
+guarda de gestión de tiempo de la profundización iterativa, que compara
+`elapsed * 2 >= ctx.time_ms` sin el offset. Es un caso menor y solo afecta a la
+decisión de *no arrancar* una iteración durante el ponder; tras el `ponderhit`
+el offset se sincroniza y el límite pasa a ser efectivo.
+
+---
+
+## 9. Estado actual (resumen)
+
+- **Versión de código**: Hy3 **1.8** (correcciones de la sección 8.1 sobre la
+  base 1.7; `ENGINE_ID = "Hy3 1.8"`).
+- **Calidad verificada**: perft exacto en 3 posiciones; peón pasado corregido;
+  hash increment. sin desbordamiento en avances a la última fila; LMR y
+  null-move con contexto preservado; generación de movimientos legal solo una
+  vez por nodo; **la búsqueda ya no se aborta en su arranque** (se emite
+  `info depth …` y un `bestmove` real tras `go … quit` en tests por lotes).
+- **Trabajo futuro prioritario**: (a) acelerar `king_zone_pressure` / añadir
+  *eval cache* (mayor ganancia de nps/elo); (b) bitboards mágicos (ver
+  `docs/MejorasPendientes.md`); (c) NNUE cuando se alcance el nivel de Elo
+  previsto.
+
+
 

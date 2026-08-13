@@ -340,11 +340,13 @@ Score evaluate(const Board& b) {
             for (int df = -1; df <= 1 && passed; df++) {
                 int ff = f + df;
                 if (ff < 0 || ff > 7) continue;
-                int en = pi.most_adv[them][ff];
+                int en = pi.least_adv[them][ff];
                 if (en < 0) continue;
-                // El peón enemigo más avanzado de esa columna, en NUESTRA
-                // perspectiva, está en la fila (7 - en). Nos frena si está
-                // por delante de nosotros.
+                // El peón enemigo MENOS avanzado de esa columna (el que ocupa
+                // la fila más alta en nuestra perspectiva) es el que primero
+                // nos frena. Si ese aún está por delante, no somos pasados (un
+                // peón más retrasado detrás no cuenta). Usar most_adv declaraba
+                // pasados peones que en realidad tenían un enemigo por delante.
                 if ((7 - en) > rel) passed = false;
             }
             if (passed) {

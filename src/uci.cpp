@@ -22,6 +22,15 @@ using namespace hy3;
 static Board g_board;
 static std::thread g_search_thread;
 static std::atomic<bool> g_searching(false);
+// Verdadero solo MIENTRAS el hilo de búsqueda está ejecutando. Evita una
+// condición de carrera: si 'quit'/'stop'/'setoption'/'position' llegan justo
+// después de 'go' (p.ej. en tests por lotes o entrada ya bufferizada), el hilo
+// principal puede llamar a signal_stop() ANTES de que run_search haya empezado,
+// poniendo g_stop_flag=1 y haciendo que la búsqueda se aborte en su primer
+// nodo (devolviendo el primer movimiento legal sin pensar). Con este flag,
+// signal_stop() solo actúa cuando la búsqueda ya está corriendo de verdad.
+// (El estado de ejecución de la búsqueda se consulta vía search_is_running()
+//  definido en search.cpp; véase el comentario de g_search_running allí).
 // La búsqueda SIEMPRE emite un 'bestmove' al terminar, cualquiera que sea el
 // motivo de terminación, para que la GUI nunca se quede esperando. (Fix #1)
 static Move g_best_move = 0;

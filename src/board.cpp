@@ -286,12 +286,18 @@ void Board::make_move(Move m, Undo& u) {
     };
     if (pt == PAWN && sq_rank(to) - sq_rank(from) == 2) {
         int ff = sq_file(from), tr = sq_rank(to);
-        ep_square = (can_ep_capture(ff - 1, tr) || can_ep_capture(ff + 1, tr))
-            ? make_sq(ff, sq_rank(from) + 1) : NO_SQ;
+        // La casilla al paso (fila intermedia) nunca puede estar en la última
+        // fila: un peón que avanza dos no llega a coronar. Sin esta guarda, un
+        // doble avance desde la fila 7 (o 2) generaba make_sq(f, 8) = casilla 64
+        // y un XOR con ZOB_EP[64..] (fuera de rango) corrupto del hash.
+        int er = sq_rank(from) + 1;
+        ep_square = (er > 0 && er < 7 && (can_ep_capture(ff - 1, tr) || can_ep_capture(ff + 1, tr)))
+            ? make_sq(ff, er) : NO_SQ;
     } else if (pt == PAWN && sq_rank(from) - sq_rank(to) == 2) {
         int ff = sq_file(from), tr = sq_rank(to);
-        ep_square = (can_ep_capture(ff - 1, tr) || can_ep_capture(ff + 1, tr))
-            ? make_sq(ff, sq_rank(from) - 1) : NO_SQ;
+        int er = sq_rank(from) - 1;
+        ep_square = (er > 0 && er < 7 && (can_ep_capture(ff - 1, tr) || can_ep_capture(ff + 1, tr)))
+            ? make_sq(ff, er) : NO_SQ;
     } else {
         ep_square = NO_SQ;
     }
