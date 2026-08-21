@@ -22,7 +22,7 @@ enum PieceType : int {
     PAWN = 0, KNIGHT = 1, BISHOP = 2, ROOK = 3, QUEEN = 4, KING = 5, NONE = 6
 };
 
-// Codificación de pieza: color*8 + tipo  (0..11)
+// Codificación de pieza: color*8 + tipo  (0..13; los índices 6 y 7 no se usan)
 constexpr Piece make_piece(Color c, PieceType t) { return c * 8 + t; }
 // Casilla vacía = (cualquier color, NONE). Constante con nombre para claridad.
 constexpr Piece EMPTY = make_piece(WHITE, NONE);
